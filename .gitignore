@@ -1,0 +1,8 @@
+# 생성물 (python3 gen_docs.py 로 다시 만들 수 있음)
+dataset/
+results*/
+*.zip
+
+__pycache__/
+*.pyc
+.DS_Store
