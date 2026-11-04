@@ -1,6 +1,8 @@
-# 생성물 (python3 gen_docs.py 로 다시 만들 수 있음)
+# 생성물 (python3 gen_docs.py / build_types_xlsx.py 로 다시 만들 수 있음)
 dataset/
+answers/
 results*/
+*.xlsx
 *.zip
 
 __pycache__/

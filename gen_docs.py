@@ -1,12 +1,12 @@
-"""제출 서류 마스킹 검수 에이전트 - 테스트용 가상 서류 + 정답지 생성기.
+"""블라인드 채용 지원 서류 셀프 점검 — 테스트용 가상 서류 + 정답지 생성기.
 
-모든 인물, 번호, 기관은 가상이며 각 문서에 '테스트용 가상 문서' 표기가 들어간다.
-출력: dataset/case_XX/{bundle.pdf, pages/*.png, answer.json, truth_boxes.json}
+모든 인물·학교·기관·번호는 가상이며 각 쪽 아래에 '해커톤 테스트용 가상 문서' 표기가 들어간다.
+출력: dataset/case_XX.pdf, dataset/pages/case_XX_pN.png, answers/case_XX.json, dataset/manifest.json
 """
 import json, os, random
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-random.seed(7)
+random.seed(11)
 W, H = 1240, 1754  # A4 @150dpi
 # 한글 글꼴: 환경변수 MASKING_FONT / MASKING_FONT_BOLD(/ MASKING_FONT_INDEX)로 지정하거나,
 # 아래 후보 중 처음 찾은 것을 쓴다. (경로, 굵은 글꼴 경로, TTC 내부 번호)
@@ -30,525 +30,591 @@ def _pick_font():
 
 
 FONT, FONT_B, FONT_INDEX = _pick_font()
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dataset')
+ROOT = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(ROOT, 'dataset')
+ANS = os.path.join(ROOT, 'answers')
+
+_fonts = {}
 
 
 def font(size, bold=False):
-    return ImageFont.truetype(FONT_B if bold else FONT, size, index=FONT_INDEX)
+    k = (size, bold)
+    if k not in _fonts:
+        _fonts[k] = ImageFont.truetype(FONT_B if bold else FONT, size, index=FONT_INDEX)
+    return _fonts[k]
 
 
-# ---------------------------------------------------------------- personas
+# ─────────────────────────────────────────── 판정표 (설계서 기준)
+VIS = {'none': 'full', 'highlight': 'full', 'black': 'hidden', 'white': 'hidden', 'star': 'hidden',
+       'blur': 'unreadable', 'partial': 'partial'}
+STATUS = {
+    'mask': {'full': 'auto_masked', 'partial': 'auto_masked', 'hidden': 'ok',
+             'unreadable': '검토 필요', 'absent': '검토 필요'},
+    'keep': {'full': 'ok', 'partial': 'over_masked', 'hidden': 'over_masked',
+             'unreadable': '검토 필요', 'absent': '검토 필요'},
+}
+
+# ─────────────────────────────────────────── 가상 인물 5세트
 PERSONAS = {
-    'P1': dict(name='김민준', rrn='990315-1478263', addr='테스트시 가상구 예시로 12, 101동 1001호',
-               bank='110-482-736519', school_id='2019123456', dept='컴퓨터학부', grade='4',
-               birth='1999년 03월 15일',
-               family=[('모', '이서연', '720811-2593104'), ('동생', '김하준', '030127-3816452')]),
-    'P2': dict(name='박지우', rrn='010622-4127385', addr='테스트시 샘플구 연습길 45-3',
-               bank='302-1157-8842-61', school_id='2020456789', dept='경영학부', grade='3',
-               birth='2001년 06월 22일',
-               family=[('부', '박성호', '680204-1352718')]),
-    'P3': dict(name='최예린', rrn='000909-4265813', addr='테스트시 모의구 가상대로 230',
-               bank='1002-374-559201', school_id='2019778812', dept='전자공학부', grade='4',
-               birth='2000년 09월 09일',
-               family=[('부', '최동현', '700517-1748362'), ('모', '한지민', '730228-2186450')]),
-    'P4': dict(name='정도윤', rrn='020403-3591746', addr='테스트시 예제구 시험로 8',
-               bank='351-0927-4416-83', school_id='2021334455', dept='기계공학부', grade='2',
-               birth='2002년 04월 03일',
-               family=[('부', '정재원', '741109-1825370'), ('모', '오수정', '760301-2459816')]),
-    'P5': dict(name='이수아', rrn='010118-4836290', addr='테스트시 가상구 표본로 77, 3층',
-               bank='220-718-394052', school_id='2020112233', dept='화학공학부', grade='3',
-               birth='2001년 01월 18일',
-               family=[('모', '윤미경', '750614-2307185'), ('동생', '이준서', '040822-3964127')]),
+    'S1': dict(name='김가람', birth='1999년 03월 15일', rrn='990315-1845273', school='가상대학교',
+               en='GASANG UNIVERSITY', domain='gasang.ac.kr', mail='garam.kim', sid='2018123456',
+               dept='컴퓨터공학과', degree='공학사', adm='2018년 03월 02일', grad='2024년 02월 23일', y0=2018,
+               addr=('가상시 예시구 연습로 12', '101동 1001호'), lic='정보처리기사', lic_no='24201030123P',
+               saddr='가상시 북구 대학로 80', stel='012-345-6789', issue='2019. 4. 3.', office='가상시 예시구청장'),
+    'S2': dict(name='이나래', birth='2000년 07월 21일', rrn='000721-4123856', school='예시대학교',
+               en='YESI UNIVERSITY', domain='yesi.ac.kr', mail='narae.lee', sid='2019234567',
+               dept='경영학과', degree='경영학사', adm='2019년 03월 04일', grad='2025년 02월 21일', y0=2019,
+               addr=('예시시 모의구 샘플길 45-3', '2층'), lic='사회조사분석사 2급', lic_no='25301120456Q',
+               saddr='예시시 동구 학교로 21', stel='023-456-7890', issue='2020. 8. 11.', office='예시시 모의구청장'),
+    'S3': dict(name='박다솜', birth='1998년 11월 02일', rrn='981102-2736145', school='샘플대학교',
+               en='SAMPLE UNIVERSITY', domain='sample.ac.kr', mail='dasom.park', sid='2017345678',
+               dept='전자공학과', degree='공학사', adm='2017년 03월 02일', grad='2023년 08월 18일', y0=2017,
+               addr=('샘플시 가상구 표본대로 230', '305호'), lic='전기기사', lic_no='23401250789R',
+               saddr='샘플시 서구 캠퍼스길 7', stel='034-567-8901', issue='2018. 1. 22.', office='샘플시 가상구청장'),
+    'S4': dict(name='최하늘', birth='2001년 01월 30일', rrn='010130-3584216', school='모의대학교',
+               en='MOUI UNIVERSITY', domain='moui.ac.kr', mail='haneul.choi', sid='2020456789',
+               dept='산업디자인학과', degree='디자인학사', adm='2020년 03월 02일', grad='2026년 02월 20일', y0=2020,
+               addr=('모의시 시험구 연습로 8', '1203호'), lic='컬러리스트기사', lic_no='26101030234S',
+               saddr='모의시 남구 배움로 55', stel='045-678-9012', issue='2021. 3. 9.', office='모의시 시험구청장'),
+    'S5': dict(name='정보람', birth='1997년 05월 09일', rrn='970509-2615384', school='시험대학교',
+               en='SIHEOM UNIVERSITY', domain='siheom.ac.kr', mail='boram.jung', sid='2016567890',
+               dept='화학공학과', degree='공학사', adm='2016년 03월 02일', grad='2022년 02월 18일', y0=2016,
+               addr=('시험시 예제구 시험로 77', '3층'), lic='화공기사', lic_no='22501040567T',
+               saddr='시험시 북구 연구로 3', stel='056-789-0123', issue='2017. 6. 30.', office='시험시 예제구청장'),
 }
 
-# ---------------------------------------------------------------- drawing helpers
-
-def new_page():
-    img = Image.new('RGB', (W, H), 'white')
-    return img, ImageDraw.Draw(img)
+COURSES = ['자료구조', '선형대수', '확률과 통계', '글쓰기와 소통', '회로이론', '경영학원론', '데이터베이스', '운영체제',
+           '전공종합설계', '공학윤리', '마케팅', '재무관리', '인공지능', '디지털신호처리', '캡스톤디자인', '현장실습']
+GRADES = ['A+', 'A0', 'B+', 'A+', 'B0', 'A0', 'A+', 'B+']
 
 
-def footer(d):
-    d.text((W // 2, H - 70), '※ 해커톤 테스트용 가상 문서 (실존 인물·기관 아님)', font=font(20),
-           fill=(120, 120, 120), anchor='mm')
+# ─────────────────────────────────────────── 쪽(page) 그리기
+class Page:
+    def __init__(self, doc_type):
+        self.doc_type = doc_type
+        self.img = Image.new('RGB', (W, H), 'white')
+        self.d = ImageDraw.Draw(self.img)
+        self.items = {}      # (field, form) -> style
+        self.masks = []      # (bbox, style)
+        self.clues = []      # 간접 단서 설명
+
+    def reg(self, field, form, style):
+        k = (field, form)
+        if k in self.items and self.items[k] != style:
+            raise ValueError(f'{self.doc_type} {k}: 같은 쪽에서 가림 방식이 다름')
+        self.items[k] = style
+
+    def text(self, xy, s, size=26, bold=False, fill='black', anchor='la'):
+        f = font(size, bold)
+        self.d.text(xy, s, font=f, fill=fill, anchor=anchor)
+        return self.d.textbbox(xy, s, font=f, anchor=anchor)
+
+    def width(self, s, size=26, bold=False):
+        b = self.d.textbbox((0, 0), s, font=font(size, bold))
+        return b[2] - b[0]
+
+    def item(self, field, form, style, xy, s, size=26, bold=False, fill='black', anchor='la'):
+        self.reg(field, form, style)
+        shown = ''.join('*' if ch not in ' -.' else ch for ch in s) if style == 'star' else s
+        bb = self.text(xy, shown, size, bold, fill, anchor)
+        if style not in ('none', 'star'):
+            self.masks.append(((bb[0] - 4, bb[1] - 5, bb[2] + 4, bb[3] + 5), style))
+        return bb
+
+    def mask_box(self, field, form, style, box):
+        self.reg(field, form, style)
+        if style not in ('none', 'star'):
+            self.masks.append((box, style))
+
+    def finish(self):
+        for box, style in self.masks:
+            box = tuple(int(v) for v in box)
+            if style == 'black':
+                self.d.rectangle(box, fill='black')
+            elif style == 'white':  # 수정테이프: 흰 덮개 + 옅은 테두리 자국
+                self.d.rectangle(box, fill=(252, 252, 250), outline=(200, 200, 196), width=2)
+            elif style == 'highlight':
+                ov = Image.new('RGBA', self.img.size, (0, 0, 0, 0))
+                ImageDraw.Draw(ov).rectangle(box, fill=(255, 214, 0, 120))
+                self.img = Image.alpha_composite(self.img.convert('RGBA'), ov).convert('RGB')
+                self.d = ImageDraw.Draw(self.img)
+            elif style == 'blur':
+                region = self.img.crop(box).filter(ImageFilter.GaussianBlur(7))
+                self.img.paste(region, box[:2])
+            elif style == 'partial':  # 오른쪽 60%만 가림
+                x0, y0, x1, y1 = box
+                self.d.rectangle((x0 + int((x1 - x0) * 0.4), y0, x1, y1), fill='black')
+        self.text((W // 2, H - 70), '※ 해커톤 테스트용 가상 문서입니다. 실존 인물·학교·기관과 관계없습니다.', 19,
+                  fill=(120, 120, 120), anchor='mm')
+        return self
 
 
-def text(d, xy, s, size=26, bold=False, fill='black', anchor='la'):
-    d.text(xy, s, font=font(size, bold), fill=fill, anchor=anchor)
-    return d.textbbox(xy, s, font=font(size, bold), anchor=anchor)
-
-
-def rrn_cell(img, d, xy, rrn, style, size=24, scope='back7'):
-    """주민등록번호를 그리고 지정한 방식으로 가린다. truth bbox들을 반환.
-
-    style: none | black | star | white | highlight | black_back6
-    scope: back7 (뒷 7자리) | all (13자리)
-    반환: dict(full_bbox, back_bbox, visible_after)
-    """
-    f = font(size)
-    front, back = rrn.split('-')
-    x, y = xy
-    if style == 'star':
-        shown = front + '-' + '*' * 7 if scope == 'back7' else '******-*******'
-        d.text((x, y), shown, font=f, fill='black')
-        bb = d.textbbox((x, y), rrn, font=f)
-        fb = d.textbbox((x, y), front + '-', font=f)
-        return dict(full_bbox=bb, back_bbox=(fb[2], bb[1], bb[2], bb[3]))
-    d.text((x, y), rrn, font=f, fill='black')
-    bb = d.textbbox((x, y), rrn, font=f)
-    fb = d.textbbox((x, y), front + '-', font=f)
-    back_box = (fb[2] - 1, bb[1] - 4, bb[2] + 3, bb[3] + 4)
-    if style == 'black_back6':  # 성별 자리는 보이고 뒤 6자리만 가림 (불완전)
-        g = d.textbbox((x, y), front + '-' + back[0], font=f)
-        d.rectangle((g[2], bb[1] - 4, bb[2] + 3, bb[3] + 4), fill='black')
-    elif style in ('black', 'white', 'highlight'):
-        box = back_box if scope == 'back7' else (bb[0] - 3, bb[1] - 4, bb[2] + 3, bb[3] + 4)
-        if style == 'black':
-            d.rectangle(box, fill='black')
-        elif style == 'white':
-            d.rectangle(box, fill='white')
-        else:
-            ov = Image.new('RGBA', img.size, (0, 0, 0, 0))
-            od = ImageDraw.Draw(ov)
-            od.rectangle(box, fill=(255, 200, 0, 140))  # 반투명 형광펜
-            img.paste(Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB'))
-    return dict(full_bbox=bb, back_bbox=back_box)
-
-
-def table(d, x, y, col_w, headers, row_h=58, size=24):
-    xs = [x]
-    for w in col_w:
-        xs.append(xs[-1] + w)
-    d.rectangle((x, y, xs[-1], y + row_h), fill=(235, 235, 235), outline='black', width=2)
-    for i, h in enumerate(headers):
-        d.text(((xs[i] + xs[i + 1]) // 2, y + row_h // 2), h, font=font(size, True), fill='black', anchor='mm')
-    for xx in xs:
-        d.line((xx, y, xx, y + row_h), fill='black', width=2)
-    return xs
-
-
-def table_row(d, xs, y, row_h=58):
-    d.rectangle((xs[0], y, xs[-1], y + row_h), outline='black', width=2)
-    for xx in xs:
-        d.line((xx, y, xx, y + row_h), fill='black', width=2)
-
-
-# ---------------------------------------------------------------- documents
-
-def notice_A():
-    img, d = new_page()
-    text(d, (W // 2, 140), '2026 테스트시 청년 도약 지원사업', 46, True, anchor='mm')
-    text(d, (W // 2, 205), '제출 서류 안내', 38, True, anchor='mm')
-    d.line((120, 250, W - 120, 250), fill='black', width=3)
-    y = 300
-    lines = [
-        ('1. 제출 서류', True),
-        ('   가. 주민등록표 등본 1부 (최근 3개월 이내 발급)', False),
-        ('   나. 본인 명의 통장사본 1부', False),
-        ('   다. 재학증명서 1부', False),
-        ('', False),
-        ('2. 개인정보 가림 안내', True),
-        ('   가. 주민등록번호는 앞 6자리(생년월일)만 보이게 하고,', False),
-        ('       뒷자리 7자리는 반드시 가려서 제출합니다.', False),
-        ('   나. 등본에 함께 기재된 세대원의 주민등록번호도', False),
-        ('       같은 방식으로 뒷자리 7자리를 가립니다.', False),
-        ('   다. 통장사본의 예금주와 계좌번호는 지원금 지급에 필요하므로', False),
-        ('       가리지 말고 그대로 보이게 제출합니다.', False),
-        ('', False),
-        ('3. 제출 기한 및 방법', True),
-        ('   2026. 11. 20.(금) 18:00까지 온라인 접수 (PDF 1개 파일로 제출)', False),
-        ('', False),
-        ('4. 유의 사항', True),
-        ('   서류가 누락되거나 필요한 정보가 가려진 경우 보완을 요청할 수 있습니다.', False),
-    ]
-    for s, b in lines:
-        text(d, (130, y), s, 28, b)
-        y += 50
-    text(d, (W // 2, 1450), '테스트시 청년정책과', 32, True, anchor='mm')
-    footer(d)
-    return img, {}
-
-
-def notice_B():
-    img, d = new_page()
-    text(d, (W // 2, 140), '2026 테스트구 가족 돌봄 지원 신청', 44, True, anchor='mm')
-    text(d, (W // 2, 205), '구비 서류 안내', 38, True, anchor='mm')
-    d.line((120, 250, W - 120, 250), fill='black', width=3)
-    y = 300
-    lines = [
-        ('1. 구비 서류', True),
-        ('   가족관계증명서(일반) 1부', False),
-        ('', False),
-        ('2. 개인정보 가림 안내', True),
-        ('   가. 가족관계증명서의 주민등록번호는 13자리 전체를 가려 주세요.', False),
-        ('   나. 가족 구성원의 성명과 출생연월일은 확인에 필요하므로', False),
-        ('       가리지 말고 보이게 제출합니다.', False),
-        ('', False),
-        ('3. 접수 기간', True),
-        ('   2026. 11. 2.(월) ~ 11. 27.(금)', False),
-    ]
-    for s, b in lines:
-        text(d, (130, y), s, 28, b)
-        y += 50
-    text(d, (W // 2, 1450), '테스트구청 가족복지팀', 32, True, anchor='mm')
-    footer(d)
-    return img, {}
-
-
-def masking_request():
-    """서비스 화면에서 '가리고 싶은 정보'를 고르면 자동 생성되는 기준 문서."""
-    img, d = new_page()
-    text(d, (W // 2, 150), '가림 요청서', 48, True, anchor='mm')
-    text(d, (W // 2, 215), '(가림체크 서비스에서 사용자가 선택한 항목으로 자동 생성)', 24, anchor='mm', fill=(90, 90, 90))
-    d.line((120, 260, W - 120, 260), fill='black', width=3)
-    y = 320
-    text(d, (130, y), '■ 가릴 정보', 30, True); y += 65
-    items = [(True, '주민등록번호 뒷자리 7자리'), (False, '주소'), (False, '계좌번호'), (False, '휴대전화번호')]
-    for chk, label in items:
-        d.rectangle((160, y, 192, y + 32), outline='black', width=3)
-        if chk:
-            d.line((166, y + 16, 176, y + 27), fill='black', width=4)
-            d.line((176, y + 27, 188, y + 5), fill='black', width=4)
-        text(d, (215, y - 3), label, 28)
-        y += 60
-    y += 30
-    text(d, (130, y), '■ 필수 제출 서류', 30, True); y += 60
-    text(d, (160, y), '지정하지 않음', 28)
-    footer(d)
-    return img, {}
-
-
-def resident_registration(p, styles, issue='2026년 10월 20일'):
-    """styles: [본인 style, 세대원1 style, ...]"""
-    img, d = new_page()
-    text(d, (W // 2, 120), '주 민 등 록 표', 46, True, anchor='mm')
-    text(d, (W // 2, 180), '( 등 본 )', 32, anchor='mm')
-    text(d, (110, 250), f'발급일: {issue}', 24)
-    text(d, (110, 300), f'세대주 성명: {p["name"]}', 26)
-    text(d, (110, 345), f'주소: {p["addr"]}', 26)
-    col_w = [80, 170, 170, 330, 140, 130]
-    y0 = 420
-    xs = table(d, 110, y0, col_w, ['번호', '세대주 관계', '성명', '주민등록번호', '전입일', '변동사유'])
-    rows = [('본인', p['name'], p['rrn'])] + list(p['family'])
-    truth = {}
-    for i, (rel, nm, rrn) in enumerate(rows):
-        y = y0 + 58 * (i + 1)
-        table_row(d, xs, y)
-        for j, v in enumerate([str(i + 1), rel, nm]):
-            d.text(((xs[j] + xs[j + 1]) // 2, y + 29), v, font=font(24), fill='black', anchor='mm')
-        t = rrn_cell(img, d, (xs[3] + 40, y + 13), rrn, styles[i])
-        d = ImageDraw.Draw(img)
-        d.text(((xs[4] + xs[5]) // 2, y + 29), '2020-03-02', font=font(22), fill='black', anchor='mm')
-        d.text(((xs[5] + xs[6]) // 2, y + 29), '전입', font=font(22), fill='black', anchor='mm')
-        truth[nm] = t
-    text(d, (110, y0 + 58 * (len(rows) + 1) + 60), '위 등본은 주민등록표의 원본 내용과 틀림없음을 증명합니다.', 24)
-    text(d, (W // 2, 1400), '테스트시 가상구청장', 30, True, anchor='mm')
-    footer(d)
-    return img, truth
-
-
-def family_certificate(p, styles, name_hidden=()):
-    img, d = new_page()
-    text(d, (W // 2, 130), '가족관계증명서 (일반)', 44, True, anchor='mm')
-    text(d, (110, 220), '등록기준지: 테스트시 가상구 기준로 1', 24)
-    col_w = [110, 170, 230, 330, 100]
-    y0 = 300
-    xs = table(d, 110, y0, col_w, ['구분', '성명', '출생연월일', '주민등록번호', '성별'])
-    rows = [('본인', p['name'], p['rrn'])] + list(p['family'])
-    truth = {}
-    for i, (rel, nm, rrn) in enumerate(rows):
-        y = y0 + 58 * (i + 1)
-        table_row(d, xs, y)
-        yy = rrn[:2]
-        century = '19' if rrn.split('-')[1][0] in '12' else '20'
-        birth = f'{century}{yy}년 {rrn[2:4]}월 {rrn[4:6]}일'
-        sex = '남' if rrn.split('-')[1][0] in '13' else '여'
-        d.text(((xs[0] + xs[1]) // 2, y + 29), rel, font=font(24), fill='black', anchor='mm')
-        nb = d.textbbox(((xs[1] + xs[2]) // 2, y + 29), nm, font=font(24), anchor='mm')
-        d.text(((xs[1] + xs[2]) // 2, y + 29), nm, font=font(24), fill='black', anchor='mm')
-        if nm in name_hidden:
-            d.rectangle((nb[0] - 6, nb[1] - 6, nb[2] + 6, nb[3] + 6), fill='black')
-        d.text(((xs[2] + xs[3]) // 2, y + 29), birth, font=font(22), fill='black', anchor='mm')
-        t = rrn_cell(img, d, (xs[3] + 40, y + 13), rrn, styles[i][0], scope=styles[i][1])
-        d = ImageDraw.Draw(img)
-        d.text(((xs[4] + xs[5]) // 2, y + 29), sex, font=font(24), fill='black', anchor='mm')
-        truth[nm] = t
-    text(d, (110, y0 + 58 * (len(rows) + 1) + 60), '위 가족관계증명서는 가족관계등록부의 기록사항과 틀림없음을 증명합니다.', 22)
-    text(d, (W // 2, 1400), '테스트시 가상구청장', 30, True, anchor='mm')
-    footer(d)
-    return img, truth
-
-
-def bankbook(p, acct_style='none', holder_style='none'):
-    img, d = new_page()
-    # 통장 표지 느낌의 박스
-    d.rounded_rectangle((140, 200, W - 140, 900), radius=30, outline=(30, 80, 160), width=6)
-    text(d, (200, 250), '테스트은행', 40, True, fill=(30, 80, 160))
-    text(d, (200, 320), '보통예금 통장 (사본)', 32)
-    text(d, (200, 450), '예금주', 28, fill=(80, 80, 80))
-    hb = text(d, (420, 445), p['name'], 34, True)
-    text(d, (200, 540), '계좌번호', 28, fill=(80, 80, 80))
-    ab = text(d, (420, 535), p['bank'], 34, True)
-    text(d, (200, 630), '개설일', 28, fill=(80, 80, 80))
-    text(d, (420, 625), '2019-03-04', 30)
-    text(d, (200, 760), '이 통장은 테스트용 가상 통장입니다.', 22, fill=(120, 120, 120))
-    if acct_style == 'black':
-        d.rectangle((ab[0] - 8, ab[1] - 8, ab[2] + 8, ab[3] + 8), fill='black')
-    elif acct_style == 'blur':
-        box = (ab[0] - 10, ab[1] - 10, ab[2] + 10, ab[3] + 10)
-        region = img.crop(box).filter(ImageFilter.GaussianBlur(9))
-        img.paste(region, box[:2])
-    if holder_style == 'black':
-        d.rectangle((hb[0] - 8, hb[1] - 8, hb[2] + 8, hb[3] + 8), fill='black')
-    footer(d)
-    return img, {'account_number': ab, 'account_holder': hb}
-
-
-def enrollment(p):
-    img, d = new_page()
-    text(d, (W // 2, 160), '재 학 증 명 서', 50, True, anchor='mm')
-    y = 330
-    for k, v in [('성        명', p['name']), ('생 년 월 일', p['birth']), ('소        속', f'가상대학교 {p["dept"]}'),
-                 ('학        번', p['school_id']), ('학        년', f'{p["grade"]}학년'), ('학 적 상 태', '재학')]:
-        text(d, (200, y), k, 30)
-        text(d, (480, y), ':  ' + v, 30)
-        y += 70
-    text(d, (W // 2, 900), '위 사람은 본교에 재학 중임을 증명합니다.', 32, anchor='mm')
-    text(d, (W // 2, 1000), '2026년 10월 21일', 30, anchor='mm')
-    text(d, (W // 2, 1120), '가상대학교 총장', 38, True, anchor='mm')
-    footer(d)
-    return img, {}
-
-
-def degrade(img, angle=2.6):
-    """폰 촬영 느낌: 회전 + 밝기 불균일 + 노이즈 + 약한 블러 + JPEG."""
-    bg = Image.new('RGB', (W + 120, H + 120), (205, 200, 190))
-    bg.paste(img, (60, 60))
-    rot = bg.rotate(angle, resample=Image.BICUBIC, expand=False, fillcolor=(190, 185, 175))
-    px = rot.load()
-    for _ in range(60000):
-        x, y = random.randrange(rot.width), random.randrange(rot.height)
-        v = random.randint(-45, 45)
+def degrade(page, angle=1.8, scale=0.55, blur=0.6, noise=10):
+    """스캔·촬영본처럼: 기울임, 해상도 저하, 잡음, 대비 저하 (글자는 읽히는 수준)"""
+    img = page.img.rotate(angle, resample=Image.BICUBIC, expand=False, fillcolor=(244, 244, 240))
+    img = img.resize((int(W * scale), int(H * scale)), Image.BILINEAR).resize((W, H), Image.BILINEAR)
+    img = img.filter(ImageFilter.GaussianBlur(blur))
+    px = img.load()
+    for _ in range(9000):
+        x, y = random.randrange(W), random.randrange(H)
         r, g, b = px[x, y]
-        px[x, y] = (max(0, min(255, r + v)), max(0, min(255, g + v)), max(0, min(255, b + v)))
-    shade = Image.linear_gradient('L').resize(rot.size).point(lambda t: 255 - t // 5)
-    rot = Image.composite(rot, Image.new('RGB', rot.size, (150, 145, 135)), shade)
-    rot = rot.filter(ImageFilter.GaussianBlur(0.9))
-    import io
-    buf = io.BytesIO(); rot.save(buf, 'JPEG', quality=55); buf.seek(0)
-    return Image.open(buf).convert('RGB').resize((W, H))
+        n = random.randint(-noise, noise)
+        px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)))
+    page.img = Image.blend(img, Image.new('RGB', (W, H), (236, 234, 226)), 0.12)
+    return page
 
 
-# ---------------------------------------------------------------- answer key helpers
-NOTICE_A_REQ = dict(
-    required_documents=['resident_registration', 'bankbook_copy', 'enrollment_certificate'],
-    rules=[
-        dict(document_type='resident_registration', field='resident_number', rule='mask_back_7'),
-        dict(document_type='bankbook_copy', field='account_holder', rule='must_be_visible'),
-        dict(document_type='bankbook_copy', field='account_number', rule='must_be_visible'),
-    ])
-NOTICE_B_REQ = dict(
-    required_documents=['family_relation_certificate'],
-    rules=[
-        dict(document_type='family_relation_certificate', field='resident_number', rule='mask_all'),
-        dict(document_type='family_relation_certificate', field='name', rule='must_be_visible'),
-        dict(document_type='family_relation_certificate', field='birth_date', rule='must_be_visible'),
-    ])
-REQUEST_REQ = dict(
-    required_documents=[],
-    rules=[dict(document_type='all', field='resident_number', rule='mask_back_7')])
+# ─────────────────────────────────────────── 학교 표지 요소
+def emblem(pg, cx, cy, p, style, r=66):
+    pg.d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(222, 232, 248), outline=(30, 60, 130), width=5)
+    pg.d.ellipse((cx - r + 12, cy - r + 12, cx + r - 12, cy + r - 12), outline=(30, 60, 130), width=2)
+    pg.text((cx, cy - 12), p['en'][0], 46, True, fill=(30, 60, 130), anchor='mm')
+    pg.text((cx, cy + 30), p['school'], 17, True, fill=(30, 60, 130), anchor='mm')
+    pg.mask_box('school_name', 'logo', style, (cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6))
 
 
-def chk(doc, page, field, person, rule, status, visibility):
-    return dict(document_type=doc, page=page, field=field, person_name=person, rule=rule,
-                visibility=visibility, status=status)
+def seal(pg, x, y, text1, text2, field=None, form=None, style='none', size=138):
+    red = (200, 30, 30)
+    pg.d.rectangle((x, y, x + size, y + size), outline=red, width=6)
+    pg.d.rectangle((x + 10, y + 10, x + size - 10, y + size - 10), outline=red, width=2)
+    pg.text((x + size // 2, y + size // 2 - 22), text1, 22 if len(text1) <= 5 else 18, True, fill=red, anchor='mm')
+    pg.text((x + size // 2, y + size // 2 + 24), text2, 24, True, fill=red, anchor='mm')
+    if field:
+        pg.mask_box(field, form, style, (x - 6, y - 6, x + size + 6, y + size + 6))
 
 
-RRN_VIS = {'none': 'full', 'highlight': 'full', 'black': 'front_only', 'star': 'front_only',
-           'white': 'front_only', 'black_back6': 'front_and_gender'}
-VIS_STATUS = {
-    'mask_back_7': {'full': 'auto_masked', 'front_and_gender': 'auto_masked', 'front_only': 'ok', 'hidden': 'ok',
-                    'unreadable': 'auto_masked'},
-    'mask_all': {'full': 'auto_masked', 'front_and_gender': 'auto_masked', 'front_only': 'auto_masked',
-                 'hidden': 'ok', 'unreadable': 'auto_masked'},
-    'must_be_visible': {'full': 'ok', 'hidden': 'over_masked', 'unreadable': '검토 필요', 'absent': 'missing_field'},
+def watermark(pg, p):
+    layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    ld.text((W // 2, H // 2), p['school'], font=font(190, True), fill=(150, 160, 190, 60), anchor='mm')
+    layer = layer.rotate(28, resample=Image.BICUBIC)
+    pg.img = Image.alpha_composite(pg.img.convert('RGBA'), layer).convert('RGB')
+    pg.d = ImageDraw.Draw(pg.img)
+    pg.reg('school_name', 'watermark', 'none')
+
+
+def photo(pg, x, y, style, w=190, h=240):
+    pg.d.rectangle((x, y, x + w, y + h), fill=(210, 214, 220), outline=(140, 140, 140), width=2)
+    pg.d.ellipse((x + w * 0.3, y + h * 0.16, x + w * 0.7, y + h * 0.52), fill=(120, 126, 136))
+    pg.d.pieslice((x + w * 0.12, y + h * 0.56, x + w * 0.88, y + h * 1.25), 180, 360, fill=(120, 126, 136))
+    pg.mask_box('photo', 'photo', style, (x - 4, y - 4, x + w + 4, y + h + 4))
+
+
+# ─────────────────────────────────────────── 서류
+NOTICE = {
+    'A': dict(
+        title='2026 가상시설관리공단 신입사원 블라인드 채용', sub='제출 서류 및 블라인드 처리 안내',
+        lines=[('1. 제출 서류 (PDF 1개 파일로 제출)', True),
+               ('   가. 최종학교 졸업증명서 1부', False), ('   나. 성적증명서 1부', False),
+               ('   다. 자격증 사본 1부', False), ('   라. 신분증 사본 1부', False), ('', False),
+               ('2. 블라인드 처리 기준', True),
+               ('   가. 졸업증명서·성적증명서: 학교명(로고·직인·영문 표기·워터마크 포함),', False),
+               ('       학번, 입학일자, 졸업일자, 생년월일을 가립니다.', False),
+               ('   나. 신분증 사본: 주민등록번호 뒷자리, 주소, 사진을 가립니다.', False),
+               ('   다. 자격증 사본: 성명과 자격 종목은 확인을 위해 가리지 않습니다.', False),
+               ('   라. 위에 적지 않은 항목은 가리지 않아도 됩니다.', False), ('', False),
+               ('3. 유의 사항', True),
+               ('   블라인드 처리를 지키지 않은 서류는 서류전형에서 감점될 수 있습니다.', False)],
+        required=['graduation_certificate', 'transcript', 'license_copy', 'id_card_copy'],
+        rules=[(d, f, 'mask') for d in ('graduation_certificate', 'transcript')
+               for f in ('school_name', 'student_id', 'admission_date', 'graduation_date', 'birth_date')]
+        + [('id_card_copy', f, 'mask') for f in ('resident_number_back', 'address', 'photo')]
+        + [('license_copy', f, 'keep') for f in ('name', 'license_type')]),
+    'B': dict(
+        title='2026 가상문화재단 직원 공개채용', sub='제출 서류 안내',
+        lines=[('1. 제출 서류', True),
+               ('   가. 졸업증명서 1부', False), ('   나. 성적증명서 1부', False), ('   다. 신분증 사본 1부', False),
+               ('', False),
+               ('2. 블라인드 기준', True),
+               ('   가. 졸업증명서·성적증명서: 학교명(로고·직인·영문 표기 포함), 학번,', False),
+               ('       성명을 가립니다.', False),
+               ('   나. 성적증명서의 학기별 연도(예: 2019학년도)도 가립니다.', False),
+               ('   다. 신분증 사본: 주민등록번호 뒷자리와 사진을 가립니다.', False), ('', False),
+               ('3. 접수: 2026. 11. 27.(금) 18:00까지 온라인 접수', True)],
+        required=['graduation_certificate', 'transcript', 'id_card_copy'],
+        rules=[(d, f, 'mask') for d in ('graduation_certificate', 'transcript')
+               for f in ('school_name', 'student_id', 'name')]
+        + [('transcript', 'semester_year', 'mask')]
+        + [('id_card_copy', f, 'mask') for f in ('resident_number_back', 'photo')]),
 }
 
+REQUEST_ITEMS = [('학교명(로고·직인·영문 표기 포함)', 'school_name'), ('학번', 'student_id'),
+                 ('입학·졸업일자', None), ('생년월일', 'birth_date'), ('주민등록번호 뒷자리', 'resident_number_back'),
+                 ('주소', 'address'), ('사진', 'photo'), ('성명', 'name')]
 
-def vchk(doc, page, field, person, rule, visibility):
-    return chk(doc, page, field, person, rule, VIS_STATUS[rule][visibility], visibility)
+
+def notice_page(kind):
+    n = NOTICE[kind]
+    pg = Page('notice')
+    pg.text((W // 2, 150), n['title'], 44, True, anchor='mm')
+    pg.text((W // 2, 215), n['sub'], 34, True, anchor='mm')
+    pg.d.line((110, 265, W - 110, 265), fill='black', width=3)
+    y = 320
+    for s, b in n['lines']:
+        if s:
+            pg.text((130, y), s, 28, b)
+        y += 56 if s else 30
+    pg.text((W - 130, y + 60), '가상기관 인사팀', 28, True, anchor='ra')
+    return pg.finish()
 
 
-def finalize(checks, missing):
-    if missing or any(c['status'] in ('over_masked', 'missing_field') for c in checks):
+def request_page(checked):
+    pg = Page('masking_request')
+    pg.text((W // 2, 150), '블라인드 가림 요청서', 46, True, anchor='mm')
+    pg.text((W // 2, 215), '(채용 공고문 없이 제출 서류를 점검할 때 작성)', 26, anchor='mm')
+    pg.d.line((110, 265, W - 110, 265), fill='black', width=3)
+    pg.text((130, 320), '제출처: 미정 (공고문 없음)', 28)
+    pg.text((130, 380), '필수 제출 서류: 지정하지 않음', 28)
+    pg.text((130, 470), '가릴 항목 (체크한 항목만 가립니다)', 30, True)
+    y = 540
+    for label, field in REQUEST_ITEMS:
+        on = field in checked
+        pg.d.rectangle((150, y, 186, y + 36), outline='black', width=3)
+        if on:
+            pg.text((168, y + 18), '✓', 32, True, anchor='mm')
+        pg.text((210, y + 2), label, 28)
+        y += 66
+    pg.text((130, y + 40), '체크하지 않은 항목은 그대로 둡니다.', 26)
+    return pg.finish()
+
+
+def grad_cert(p, st, layout=1, wm=False):
+    """st: field/form -> style. 기본 'none'."""
+    g = lambda k: st.get(k, 'none')
+    pg = Page('graduation_certificate')
+    if wm:
+        watermark(pg, p)
+    if layout == 1:
+        pg.text((W - 120, 90), '제 2026-01234 호', 22, anchor='ra')
+        emblem(pg, 190, 190, p, g('logo'))
+        pg.item('school_name', 'text', g('school'), (W // 2, 165), p['school'], 54, True, anchor='mm')
+        pg.item('school_name', 'english', g('english'), (W // 2, 232), p['en'], 26, anchor='mm')
+        pg.text((W // 2, 360), '졸 업 증 명 서', 62, True, anchor='mm')
+        y = 500
+        rows = [('성      명', 'name', p['name']), ('생 년 월 일', 'birth_date', p['birth']),
+                ('학      번', 'student_id', p['sid']), ('학과(전공)', None, p['dept']),
+                ('학      위', None, p['degree']), ('입 학 일 자', 'admission_date', p['adm']),
+                ('졸 업 일 자', 'graduation_date', p['grad'])]
+        for label, field, val in rows:
+            pg.text((230, y), label, 30)
+            pg.text((420, y), ':', 30)
+            if field:
+                pg.item(field, 'text', g(field), (460, y), val, 30)
+            else:
+                pg.text((460, y), val, 30)
+            y += 82
+        pg.text((W // 2, 1150), '위 사람은 본교 소정의 전 과정을 이수하고 졸업하였음을 증명합니다.', 30, anchor='mm')
+        pg.text((W // 2, 1290), '2026년 10월 28일', 32, anchor='mm')
+        sw = pg.width(p['school'], 40, True) + pg.width('  총  장', 40, True)
+        x0 = W // 2 - sw // 2 - 60
+        bb = pg.item('school_name', 'text', g('school'), (x0, 1400), p['school'], 40, True)
+        bb2 = pg.text((bb[2], 1400), '  총  장', 40, True)
+        seal(pg, bb2[2] + 50, 1355, p['school'], '총장의인', 'school_name', 'seal', g('seal'))
+    else:  # 표 양식
+        pg.text((120, 130), '졸업증명서', 56, True)
+        pg.text((W - 120, 150), 'No. 2026-5678', 22, anchor='ra')
+        pg.d.line((120, 225, W - 120, 225), fill=(40, 40, 40), width=4)
+        y = 290
+        rows = [('성명', 'name', p['name']), ('생년월일', 'birth_date', p['birth']), ('소속', None, p['dept']),
+                ('학번', 'student_id', p['sid']), ('입학일자', 'admission_date', p['adm']),
+                ('졸업일자', 'graduation_date', p['grad']), ('학위', None, p['degree'])]
+        for label, field, val in rows:
+            pg.d.rectangle((120, y, 400, y + 80), fill=(236, 238, 242), outline=(90, 90, 90), width=2)
+            pg.d.rectangle((400, y, W - 120, y + 80), outline=(90, 90, 90), width=2)
+            pg.text((260, y + 40), label, 28, True, anchor='mm')
+            if field:
+                pg.item(field, 'text', g(field), (430, y + 22), val, 28)
+            else:
+                pg.text((430, y + 22), val, 28)
+            y += 80
+        pg.text((120, y + 70), '위 사람은 본교의 학위과정을 마치고 위와 같이 졸업하였음을 증명함.', 28)
+        pg.text((120, y + 130), '발급일: 2026년 10월 27일', 26)
+        by = 1290
+        emblem(pg, 220, by + 40, p, g('logo'), r=62)
+        pg.item('school_name', 'text', g('school'), (320, by - 10), p['school'], 46, True)
+        pg.item('school_name', 'english', g('english'), (322, by + 58), p['en'], 24)
+        bb = pg.text((700, by - 6), '총장', 44, True)
+        seal(pg, bb[2] + 60, by - 40, p['school'], '총장의인', 'school_name', 'seal', g('seal'))
+    return pg.finish()
+
+
+def transcript(p, st1, st2, email=False, clue=False):
+    pages = []
+    sems = [(p['y0'] + i // 2, i % 2 + 1) for i in range(8)]
+    for n, st in ((1, st1), (2, st2)):
+        g = lambda k: st.get(k, 'none')
+        pg = Page('transcript')
+        bb = pg.item('school_name', 'text', g('school'), (120, 110), p['school'], 44, True)
+        pg.text((bb[2] + 14, 110), '성적증명서', 44, True)
+        pg.text((W - 120, 126), f'({n}/2)', 24, anchor='ra')
+        pg.d.line((120, 190, W - 120, 190), fill='black', width=3)
+        if n == 1:
+            y = 220
+            pg.text((120, y), '성명', 26, True)
+            pg.item('name', 'text', g('name'), (250, y), p['name'], 26)
+            pg.text((640, y), '학번', 26, True)
+            pg.item('student_id', 'text', g('student_id'), (770, y), p['sid'], 26)
+            y += 54
+            pg.text((120, y), '생년월일', 26, True)
+            pg.item('birth_date', 'text', g('birth_date'), (250, y), p['birth'], 26)
+            pg.text((640, y), '학과', 26, True)
+            pg.text((770, y), p['dept'], 26)
+            y += 54
+            pg.text((120, y), '입학일자', 26, True)
+            pg.item('admission_date', 'text', g('admission_date'), (250, y), p['adm'], 26)
+            pg.text((640, y), '졸업일자', 26, True)
+            pg.item('graduation_date', 'text', g('graduation_date'), (770, y), p['grad'], 26)
+            y += 54
+            if email:
+                pg.text((120, y), '이메일', 26, True)
+                pg.item('school_name', 'email', g('email'), (250, y), f"{p['mail']}@{p['domain']}", 26)
+                y += 54
+            top, rng = y + 30, sems[:4]
+        else:
+            pg.text((120, 220), '학번', 26, True)
+            pg.item('student_id', 'text', g('student_id'), (200, 220), p['sid'], 26)
+            pg.text((560, 220), '성명', 26, True)
+            pg.item('name', 'text', g('name'), (640, 220), p['name'], 26)
+            top, rng = 300, sems[4:]
+        xs = [120, 450, 900, 1000, W - 120]
+        pg.d.rectangle((xs[0], top, xs[-1], top + 54), fill=(232, 232, 232), outline='black', width=2)
+        for i, h in enumerate(['학년도·학기', '교과목명', '학점', '성적']):
+            pg.text(((xs[i] + xs[i + 1]) // 2, top + 27), h, 24, True, anchor='mm')
+        y = top + 54
+        for si, (yr, sm) in enumerate(rng):
+            for ci in range(2):
+                pg.d.rectangle((xs[0], y, xs[-1], y + 52), outline=(80, 80, 80), width=1)
+                if ci == 0:
+                    bb = pg.item('semester_year', 'text', g('semester_year'), (140, y + 12), f'{yr}학년도', 24)
+                    pg.text((bb[2] + 10, y + 12), f'{sm}학기', 24)
+                cn = COURSES[(si * 2 + ci + (n - 1) * 8 + len(p['name'])) % len(COURSES)]
+                pg.text((470, y + 12), cn, 24)
+                pg.text((950, y + 26), '3', 24, anchor='mm')
+                pg.text((1060, y + 26), GRADES[(si * 2 + ci) % len(GRADES)], 24, anchor='mm')
+                y += 52
+        for xx in xs:
+            pg.d.line((xx, top, xx, y), fill=(80, 80, 80), width=1)
+        if n == 2:
+            pg.text((120, y + 40), '총 취득학점 130 / 평점평균 3.87 (4.5 만점)', 26, True)
+            pg.text((120, y + 130), '2026년 10월 28일', 26)
+            bb = pg.item('school_name', 'text', g('school'), (120, y + 190), p['school'], 30, True)
+            pg.text((bb[2] + 12, y + 190), '학사지원팀', 30, True)
+            if clue:
+                pg.text((120, H - 160), f"{p['saddr']} · 대표전화 {p['stel']}", 22, fill=(70, 70, 70))
+                pg.clues.append('학교 주소·대표전화')
+        pages.append(pg.finish())
+    return pages
+
+
+def license_copy(p, st, blur_type=False):
+    g = lambda k: st.get(k, 'none')
+    pg = Page('license_copy')
+    pg.d.rectangle((140, 180, W - 140, 1300), outline=(30, 80, 60), width=8)
+    pg.d.rectangle((160, 200, W - 160, 1280), outline=(30, 80, 60), width=2)
+    pg.text((W // 2, 300), '국가기술자격증', 58, True, fill=(20, 70, 50), anchor='mm')
+    pg.text((W // 2, 370), 'National Technical Qualification', 24, fill=(60, 90, 80), anchor='mm')
+    y = 480
+    rows = [('자격종목', 'license_type', p['lic']), ('성      명', 'name', p['name']),
+            ('생년월일', 'birth_date', p['birth']), ('자격번호', None, p['lic_no']),
+            ('합격연월일', None, '2024년 06월 14일')]
+    for label, field, val in rows:
+        pg.text((260, y), label, 32, True)
+        style = 'blur' if (blur_type and field == 'license_type') else g(field)
+        if field:
+            pg.item(field, 'text', style, (500, y), val, 32)
+        else:
+            pg.text((500, y), val, 32)
+        y += 95
+    pg.text((W // 2, 1010), '위 사람은 국가기술자격법에 따른 자격을 취득하였음을 증명합니다.', 26, anchor='mm')
+    pg.text((W // 2, 1080), '2024년 07월 01일', 28, anchor='mm')
+    bb = pg.text((W // 2 - 60, 1170), '가상인력공단 이사장', 34, True, anchor='mm')
+    seal(pg, bb[2] + 30, 1110, '가상인력', '공단인', size=120)
+    return pg.finish()
+
+
+def id_card(p, st):
+    g = lambda k: st.get(k, 'none')
+    pg = Page('id_card_copy')
+    pg.text((120, 120), '신분증 사본', 30, True)
+    x0, y0, x1, y1 = 170, 260, 1070, 820
+    pg.d.rounded_rectangle((x0, y0, x1, y1), radius=36, fill=(240, 246, 252), outline=(110, 130, 160), width=4)
+    pg.text((x0 + 60, y0 + 50), '주민등록증', 50, True, fill=(30, 50, 90))
+    pg.item('name', 'text', g('name'), (x0 + 60, y0 + 150), p['name'], 40, True)
+    front, back = p['rrn'].split('-')
+    bb = pg.text((x0 + 60, y0 + 225), front + '-', 36)
+    rs = g('resident_number_back')
+    if rs == 'partial':  # 성별 자리만 보이고 뒤 6자리 가림
+        pg.reg('resident_number_back', 'text', 'partial')
+        b1 = pg.text((bb[2], y0 + 225), back, 36)
+        gx = pg.d.textbbox((bb[2], y0 + 225), back[0], font=font(36))[2]
+        pg.masks.append(((gx + 2, b1[1] - 5, b1[2] + 4, b1[3] + 5), 'black'))
+    else:
+        pg.item('resident_number_back', 'text', rs, (bb[2], y0 + 225), back, 36)
+    pg.item('address', 'text', g('address'), (x0 + 60, y0 + 310), p['addr'][0], 28)
+    pg.item('address', 'text', g('address'), (x0 + 60, y0 + 355), p['addr'][1], 28)
+    pg.text((x0 + 380, y0 + 440), p['issue'], 26)
+    pg.text((x0 + 340, y0 + 482), p['office'], 28, True)
+    photo(pg, x1 - 260, y0 + 120, g('photo'))
+    return pg.finish()
+
+
+# ─────────────────────────────────────────── 케이스
+HID = dict(school='black', logo='black', english='black', seal='black', student_id='black',
+           admission_date='black', graduation_date='black', birth_date='black')
+IDH = dict(resident_number_back='black', address='black', photo='black')
+
+
+def with_style(d, style):
+    return {k: style for k in d}
+
+
+def bundle_A(p, gs=None, t1=None, t2=None, lic=None, ids=None, layout=1, wm=False, email=False, clue=False,
+             blur_type=False, drop=()):
+    pages = [notice_page('A')]
+    if 'graduation_certificate' not in drop:
+        pages.append(grad_cert(p, gs or HID, layout, wm))
+    if 'transcript' not in drop:
+        pages += transcript(p, t1 or HID, t2 or HID, email, clue)
+    if 'license_copy' not in drop:
+        pages.append(license_copy(p, lic or {}, blur_type))
+    if 'id_card_copy' not in drop:
+        pages.append(id_card(p, ids or IDH))
+    return pages
+
+
+def cases():
+    P = PERSONAS
+    out = []
+
+    def add(cid, s, kind, purpose, crit, pages, note):
+        out.append(dict(id=cid, set=s, type=kind, purpose=purpose, criteria=crit, pages=pages, note=note))
+
+    # S1: 정상 / 같은 서류 + 다른 공고
+    s1_docs = lambda: bundle_A(P['S1'])[1:]
+    add('case_01', 'S1', '단순', '공고 기준대로 모두 가린 정상 제출', 'A', bundle_A(P['S1']),
+        '학교명·학번·입학/졸업일·생년월일·주민번호 뒷자리·주소·사진 모두 검은 박스')
+    add('case_07', 'S1', '결합', 'case_01과 같은 서류에 다른 공고(B) 적용 → 기준에 따라 판정이 바뀌는지', 'B',
+        [notice_page('B')] + s1_docs(), '공고 B는 성명·학기별 연도도 가리라고 함 → 노출된 성명·연도는 자동 가림')
+    # S2: 학교 표지 요소 노출 / 저품질 신분증 + 누락
+    gs2 = dict(HID, logo='none', english='none', seal='none')
+    add('case_02', 'S2', '양식', '학교명 글자는 가렸지만 로고·영문명·직인·워터마크에 학교명이 남음', 'A',
+        bundle_A(P['S2'], gs=gs2, wm=True), '졸업증명서 로고·영문 표기·직인·워터마크 노출 → 자동 가림 대상')
+    p10 = bundle_A(P['S2'], ids=dict(resident_number_back='partial', address='none', photo='none'),
+                   drop=('transcript',))
+    p10[-1] = degrade(p10[-1], angle=2.4)
+    add('case_10', 'S2', '저품질', '기울어진 저화질 신분증 스캔 + 필수 서류(성적증명서) 누락', 'A', p10,
+        '주민번호 성별 자리 노출(일부 가림), 주소·사진 노출, 성적증명서 없음')
+    # S3: 표 양식 + 쪽별 가림 차이 / 반투명 덧칠 + 흐림
+    w = lambda d: with_style(d, 'white')
+    t1s3 = dict(w(HID), student_id='star')
+    t2s3 = dict(w(HID), student_id='none')
+    add('case_03', 'S3', '양식', '표 양식 졸업증명서, 흰색 덮개·별표 가림, 성적증명서 2쪽만 학번 노출', 'A',
+        bundle_A(P['S3'], gs=w(HID), t1=t1s3, t2=t2s3, ids=w(IDH), layout=2),
+        '성적증명서 1쪽 학번은 별표, 2쪽 학번은 그대로 → 2쪽만 자동 가림')
+    p6 = bundle_A(P['S3'], t2=dict(HID, school='highlight'), blur_type=True)
+    p6[4] = degrade(p6[4], angle=-1.2, scale=0.6)
+    add('case_06', 'S3', '저품질', '반투명 형광펜 덧칠 + 흐린 스캔으로 필수 정보 판독 불가', 'A', p6,
+        '성적증명서 2쪽 학교명 위 형광펜(글자 비침), 자격증 자격종목 흐림')
+    # S4: 과도한 가림 / 공고문 없음
+    add('case_04', 'S4', '예외', '남겨야 할 성명·자격 종목까지 가림(과도한 가림)', 'A',
+        bundle_A(P['S4'], lic=dict(name='black', license_type='black')), '자격증 사본의 성명·자격종목 검은 박스')
+    req = ('school_name', 'student_id', 'resident_number_back', 'photo')
+    gs8 = dict(school='black', english='black', seal='black', logo='none', student_id='black')
+    p8 = [request_page(req), grad_cert(P['S4'], gs8), id_card(P['S4'], dict(resident_number_back='none',
+                                                                             photo='black'))]
+    add('case_08', 'S4', '예외', '공고문 없이 가림 요청서로 점검', 'request', p8,
+        '요청서: 학교명·학번·주민번호 뒷자리·사진 체크. 로고·주민번호 뒷자리 노출 → 자동 가림, 기준 미확인 → 검토 필요')
+    # S5: 누락 / 이메일 도메인 + 간접 단서
+    st = lambda d: with_style(d, 'star')
+    gs5 = dict(HID, student_id='star', birth_date='star', admission_date='star', graduation_date='star')
+    add('case_05', 'S5', '예외', '필수 서류(자격증 사본) 누락', 'A',
+        bundle_A(P['S5'], gs=gs5, t1=gs5, t2=gs5, drop=('license_copy',)), '자격증 사본 없음, 나머지는 기준대로 가림')
+    add('case_09', 'S5', '결합', '학교 이메일 도메인 노출 + 학교 주소·전화번호(간접 단서)', 'A',
+        bundle_A(P['S5'], gs=w(HID), t1=dict(w(HID), email='none'), t2=w(HID), ids=w(IDH), layout=2,
+                 email=True, clue=True),
+        '성적증명서 1쪽 이메일(@siheom.ac.kr) 노출 → 자동 가림, 2쪽 하단 학교 주소·전화 → 검토 필요')
+    return sorted(out, key=lambda c: c['id'])
+
+
+# ─────────────────────────────────────────── 정답지
+DOC_KO = dict(notice='공고문', masking_request='가림 요청서', graduation_certificate='졸업증명서',
+              transcript='성적증명서', license_copy='자격증 사본', id_card_copy='신분증 사본')
+FIELD_KO = dict(school_name='학교명', student_id='학번', admission_date='입학일자', graduation_date='졸업일자',
+                birth_date='생년월일', resident_number_back='주민등록번호 뒷자리', address='주소', photo='사진',
+                name='성명', license_type='자격 종목', semester_year='학기별 연도')
+FORM_ORDER = ['text', 'logo', 'seal', 'watermark', 'english', 'email', 'photo']
+FIELD_ORDER = list(FIELD_KO)
+
+
+def answer(c):
+    p = PERSONAS[c['set']]
+    if c['criteria'] == 'request':
+        crit = 'masking_request'
+        req = [f for f in ('school_name', 'student_id', 'resident_number_back', 'photo')]
+        rules = [('all', f, 'mask') for f in req]
+        required = []
+    else:
+        crit = 'notice'
+        rules = NOTICE[c['criteria']]['rules']
+        required = NOTICE[c['criteria']]['required']
+    rmap = {(d, f): r for d, f, r in rules}
+    sub = []
+    for pg in c['pages']:
+        if pg.doc_type not in sub:
+            sub.append(pg.doc_type)
+    checks, reasons = [], []
+    for i, pg in enumerate(c['pages'], 1):
+        rows = []
+        for (field, form), style in pg.items.items():
+            rule = rmap.get((pg.doc_type, field)) or rmap.get(('all', field))
+            if not rule:
+                continue
+            vis = VIS[style]
+            status = STATUS[rule][vis]
+            rows.append(dict(document_type=pg.doc_type, page=i, field=field, form=form, rule=rule,
+                             visibility=vis, status=status))
+            if status == '검토 필요':
+                reasons.append(f"{DOC_KO[pg.doc_type]} {i}쪽 {FIELD_KO[field]} 판독 불가")
+        rows.sort(key=lambda r: (FIELD_ORDER.index(r['field']), FORM_ORDER.index(r['form'])))
+        checks += rows
+        for cl in pg.clues:
+            reasons.append(f"{DOC_KO[pg.doc_type]} {i}쪽 하단 {cl}로 학교를 짐작할 수 있음")
+    if crit == 'masking_request':
+        reasons.insert(0, '공고문이 없어 가림 요청서 기준으로만 점검함')
+    missing = [d for d in required if d not in sub]
+    statuses = [r['status'] for r in checks]
+    if missing or 'over_masked' in statuses:
         result = '보완 필요'
-    elif any(c['status'] == '검토 필요' for c in checks):
+    elif reasons:
         result = '검토 필요'
     else:
         result = '통과'
-    return result
-
-
-# ---------------------------------------------------------------- cases
-
-def build_cases():
-    P = PERSONAS
-    cases = []
-
-    def bank_checks(page, p, acct='full', holder='full'):
-        return [vchk('bankbook_copy', page, 'account_holder', p['name'], 'must_be_visible', holder),
-                vchk('bankbook_copy', page, 'account_number', p['name'], 'must_be_visible', acct)]
-
-    def rr_checks(page, p, styles):
-        rows = [p['name']] + [f[1] for f in p['family']]
-        return [vchk('resident_registration', page, 'resident_number', nm, 'mask_back_7', RRN_VIS[s])
-                for nm, s in zip(rows, styles)]
-
-    # case 01 단순: 정상 가림
-    p = P['P1']; st = ['black', 'black', 'black']
-    cases.append(dict(id='case_01', type='단순', desc='등본 3명 모두 정상 가림, 통장·재학 정상',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', resident_registration(p, st)),
-                             ('bankbook_copy', bankbook(p)), ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st) + bank_checks(3, p), missing=[]))
-    # case 02 단순: 본인 노출
-    p = P['P2']; st = ['none', 'star']
-    cases.append(dict(id='case_02', type='단순', desc='등본 본인 주민번호 노출(세대원은 * 가림)',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', resident_registration(p, st)),
-                             ('bankbook_copy', bankbook(p)), ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st) + bank_checks(3, p), missing=[]))
-    # case 03 양식 다양성: 가림 요청서(사용자 선택) + 가림 방식 혼합 + 체크 안 한 계좌번호
-    p = P['P3']; fs = [('star', 'back7'), ('white', 'back7'), ('black', 'back7')]
-    rows = [p['name']] + [f[1] for f in p['family']]
-    cases.append(dict(id='case_03', type='양식·문맥 다양성',
-                      desc='가림 요청서 기준, 가족관계증명서 가림 방식 3종(*, 흰 덮개, 검은 박스), 계좌번호는 요청 안 함',
-                      applicant=p['name'], req=REQUEST_REQ,
-                      pages=[('masking_request', masking_request()), ('family_relation_certificate', family_certificate(p, fs)),
-                             ('bankbook_copy', bankbook(p))],
-                      checks=[vchk('family_relation_certificate', 2, 'resident_number', nm, 'mask_back_7', 'front_only') for nm in rows],
-                      missing=[]))
-    # case 04 양식 다양성: 공고 B (13자리 전체 가림) - 뒷자리만 가린 서류
-    p = P['P4']; fs = [('black', 'back7')] * 3
-    rows = [p['name']] + [f[1] for f in p['family']]
-    ck = []
-    for nm in rows:
-        ck += [vchk('family_relation_certificate', 2, 'resident_number', nm, 'mask_all', 'front_only'),
-               vchk('family_relation_certificate', 2, 'name', nm, 'must_be_visible', 'full'),
-               vchk('family_relation_certificate', 2, 'birth_date', nm, 'must_be_visible', 'full')]
-    cases.append(dict(id='case_04', type='양식·문맥 다양성', desc='공고 B는 13자리 전체 가림 요구, 서류는 뒷자리만 가림',
-                      applicant=p['name'], req=NOTICE_B_REQ,
-                      pages=[('notice', notice_B()), ('family_relation_certificate', family_certificate(p, fs))],
-                      checks=ck, missing=[]))
-    # case 05 문서 결합: 세대원 1명만 노출, 공고문이 마지막 페이지
-    p = P['P5']; st = ['black', 'black', 'none']
-    cases.append(dict(id='case_05', type='문서 결합', desc='등본 세대원(동생)만 노출, 공고문이 묶음 맨 뒤',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('resident_registration', resident_registration(p, st)), ('bankbook_copy', bankbook(p)),
-                             ('enrollment_certificate', enrollment(p)), ('notice', notice_A())],
-                      checks=rr_checks(1, p, st) + bank_checks(2, p), missing=[]))
-    # case 06 문서 결합: 통장 계좌번호 과잉 가림
-    p = P['P2']; st = ['black', 'black']
-    cases.append(dict(id='case_06', type='문서 결합', desc='통장사본 계좌번호까지 가림(과잉)',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', resident_registration(p, st)),
-                             ('bankbook_copy', bankbook(p, acct_style='black')), ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st) + bank_checks(3, p, acct='hidden'), missing=[]))
-    # case 07 문서 결합: 통장 누락 + 본인 노출
-    p = P['P5']; st = ['none', 'black', 'black']
-    cases.append(dict(id='case_07', type='문서 결합', desc='통장사본 누락 + 등본 본인 노출',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', resident_registration(p, st)),
-                             ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st), missing=['bankbook_copy']))
-    # case 08 저품질: 폰 촬영 등본, 본인 노출
-    p = P['P1']; st = ['none', 'black', 'black']
-    rr_img, rr_truth = resident_registration(p, st)
-    cases.append(dict(id='case_08', type='저품질', desc='폰으로 기울게 찍은 등본(노이즈·그림자), 본인 노출',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', (degrade(rr_img), rr_truth)),
-                             ('bankbook_copy', bankbook(p)), ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st) + bank_checks(3, p), missing=[], degraded=True))
-    # case 09 함정: 반투명 형광펜 + 성별 자리 노출(뒤 6자리만 가림)
-    p = P['P4']; st = ['highlight', 'black_back6', 'black']
-    cases.append(dict(id='case_09', type='예외·함정', desc='본인은 반투명 형광펜(글자 보임), 부는 뒤 6자리만 가림(성별 자리 노출)',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', resident_registration(p, st)),
-                             ('bankbook_copy', bankbook(p)), ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st) + bank_checks(3, p), missing=[]))
-    # case 10 함정: 계좌번호 판독 불가(흐림)
-    p = P['P3']; st = ['black', 'black', 'black']
-    cases.append(dict(id='case_10', type='예외·함정', desc='통장사본 계좌번호가 흐려서 판독 불가',
-                      applicant=p['name'], req=NOTICE_A_REQ,
-                      pages=[('notice', notice_A()), ('resident_registration', resident_registration(p, st)),
-                             ('bankbook_copy', bankbook(p, acct_style='blur')), ('enrollment_certificate', enrollment(p))],
-                      checks=rr_checks(2, p, st) + bank_checks(3, p, acct='unreadable'), missing=[]))
-    return cases
-
-
-REQUEST_TEMPLATES = {
-    'over_masked': '{doc} {page}페이지의 {field}({person})이(가) 가려져 있어요. 확인에 필요한 정보이니 가리지 않은 사본으로 다시 제출해 주세요.',
-    'missing_field': '{doc} {page}페이지에서 {field}({person})을(를) 찾을 수 없어요. 해당 정보가 보이는 서류로 다시 제출해 주세요.',
-    'missing_doc': '{doc}이(가) 제출 서류에 없어요. 추가로 제출해 주세요.',
-}
-DOC_KO = dict(notice='공고문', masking_request='가림 요청서', resident_registration='주민등록표 등본',
-              family_relation_certificate='가족관계증명서', bankbook_copy='통장사본',
-              enrollment_certificate='재학증명서')
-FIELD_KO = dict(resident_number='주민등록번호', account_number='계좌번호', account_holder='예금주',
-                name='성명', birth_date='출생연월일')
-
-
-def request_message(checks, missing):
-    msgs = []
-    for c in checks:
-        if c['status'] in ('over_masked', 'missing_field'):
-            msgs.append(REQUEST_TEMPLATES[c['status']].format(doc=DOC_KO[c['document_type']], page=c['page'],
-                                                              field=FIELD_KO[c['field']], person=c['person_name']))
-    for m in missing:
-        msgs.append(REQUEST_TEMPLATES['missing_doc'].format(doc=DOC_KO[m]))
-    return ' '.join(msgs)
+    name_masked = any(f == 'name' and r == 'mask' for _, f, r in rules)
+    name = '' if name_masked else p['name']
+    return dict(applicant_name=name, criteria_source=crit,
+                rules=[dict(document_type=d, field=f, rule=r) for d, f, r in rules],
+                submitted_documents=sub, missing_documents=missing, checks=checks,
+                review_reasons=reasons, result=result)
 
 
 def main():
-    os.makedirs(OUT, exist_ok=True)
-    index = []
-    for c in build_cases():
-        cdir = os.path.join(OUT, c['id'])
-        pdir = os.path.join(cdir, 'pages')
-        os.makedirs(pdir, exist_ok=True)
-        imgs, truth = [], {}
-        for i, (kind, (img, t)) in enumerate(c['pages'], 1):
-            fn = f'p{i}_{kind}.png'
-            img.save(os.path.join(pdir, fn))
-            imgs.append(img)
-            if t:
-                truth[f'page_{i}'] = {k: {kk: list(vv) for kk, vv in v.items()} if isinstance(v, dict) else list(v)
-                                      for k, v in t.items()}
-        imgs[0].save(os.path.join(cdir, 'bundle.pdf'), save_all=True, append_images=imgs[1:], resolution=150)
-        review = [f"{DOC_KO[x['document_type']]} {x['page']}페이지 {FIELD_KO[x['field']]}({x['person_name']}) 판독 불가"
-                  for x in c['checks'] if x['status'] == '검토 필요']
-        answer = dict(
-            applicant_name=c['applicant'],
-            criteria_source='masking_request' if c['req'] is REQUEST_REQ else 'notice',
-            required_documents=c['req']['required_documents'],
-            rules=c['req']['rules'],
-            submitted_documents=list(dict.fromkeys(k for k, _ in c['pages'])),
-            missing_documents=c['missing'],
-            checks=c['checks'],
-            result=finalize(c['checks'], c['missing']),
-            review_reasons=review,
-            request_message=request_message(c['checks'], c['missing']),
-        )
-        with open(os.path.join(cdir, 'answer.json'), 'w', encoding='utf-8') as f:
-            json.dump(answer, f, ensure_ascii=False, indent=2)
-        with open(os.path.join(cdir, 'truth_boxes.json'), 'w', encoding='utf-8') as f:
-            json.dump(truth, f, ensure_ascii=False, indent=2)
-        index.append(dict(id=c['id'], type=c['type'], desc=c['desc'], result=answer['result'],
-                          auto_masked=sum(1 for x in c['checks'] if x['status'] == 'auto_masked'), pages=len(imgs)))
-    with open(os.path.join(OUT, 'index.json'), 'w', encoding='utf-8') as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
-    for r in index:
-        print(r)
+    os.makedirs(os.path.join(DATA, 'pages'), exist_ok=True)
+    os.makedirs(ANS, exist_ok=True)
+    manifest = []
+    for c in cases():
+        imgs = [pg.img for pg in c['pages']]
+        pdf = os.path.join(DATA, c['id'] + '.pdf')
+        imgs[0].save(pdf, save_all=True, append_images=imgs[1:], resolution=150)
+        for i, im in enumerate(imgs, 1):
+            im.save(os.path.join(DATA, 'pages', f"{c['id']}_p{i}.png"))
+        a = answer(c)
+        json.dump(a, open(os.path.join(ANS, c['id'] + '.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+        manifest.append(dict(file=c['id'] + '.pdf', set=c['set'], type=c['type'], purpose=c['purpose'],
+                             criteria=a['criteria_source'] if c['criteria'] == 'request' else f"notice({c['criteria']})",
+                             documents=[pg.doc_type for pg in c['pages']], note=c['note'], result=a['result'],
+                             n_checks=len(a['checks'])))
+        print(c['id'], c['type'], len(imgs), '쪽', a['result'], 'checks', len(a['checks']), 'missing', a['missing_documents'])
+    json.dump(manifest, open(os.path.join(DATA, 'manifest.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 
 
 if __name__ == '__main__':
