@@ -1,14 +1,14 @@
 """Studio 실행 결과와 정답지를 비교한다.
 
 사용법: python3 compare.py results_v1/
-비교: applicant_name, criteria_source, result, submitted_documents, missing_documents, rules(집합),
+비교: request_number, criteria_source, result, submitted_documents, missing_documents, rules(집합),
       checks((document_type, page, field, form)를 키로 rule·visibility·status), 정답에 없는 행
 제외: review_reasons (자유 문장)
 """
 import json, os, sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SCALAR = ['applicant_name', 'criteria_source', 'result']
+SCALAR = ['request_number', 'criteria_source', 'result']
 SETS = ['submitted_documents', 'missing_documents']
 COLS = ['rule', 'visibility', 'status']
 
