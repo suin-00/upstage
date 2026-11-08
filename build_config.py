@@ -1,9 +1,16 @@
-"""정보공개 문서 개인정보 가림 점검 워크플로우 설정 생성기.
+"""정보공개 문서 개인정보 가림 점검 워크플로우 설정 생성기 (Studio 설정 #13).
 
-workflow/정보공개점검_workflow_config.json : Studio '워크플로우 설정 가져오기'용
-  Parse(OCR 강제) → Extract(고급형) → Validate → Instruct(결정: 공개 가능/수정 필요/검토 필요) → Export
-  EXPORT_TABLE을 비우면 Export 노드 없이 만든다(Studio에서 Export를 붙이면 표가 새로 생긴다).
-workflow/정보공개점검_extract_schema.json : 추출 항목만
+원본 PDF를 한 번 실행하면 점검과 공개본 만들기가 함께 돈다.
+  Parse(OCR 강제, 좌표)
+  → Classify(분할, 겹침 허용: 같은 쪽 전체를 "점검용"·"공개본용" 두 조각으로 복제)
+      ├ 점검용   → Extract 점검(disclosure_check_schema, 고급형) → Validate(검증-1) → Instruct 판정(instruct-default)
+      └ 공개본용 → Extract 문서 마스킹하기(disclosure_mask) → Instruct 가림 처리 내역서(processing_log)
+  → Merge(병합-1) → Instruct 최종 처리 결과(final_report: 판정 + 자동 가림 대조 + 담당자 처리 항목)
+Studio는 한 경로에 Extract를 하나만 허용해서(마스킹도 Extract) Classify 분할로 갈래를 나눴다.
+겹침 허용(allowOverlap)은 편집기 화면에 없는 설정이라, Studio에서 Classify 노드를 고치면 풀릴 수 있다.
+
+workflow/정보공개점검_workflow_config.json : Studio '워크플로우 설정 가져오기'용 (설정 #13 내보내기와 같은 내용)
+workflow/정보공개점검_extract_schema.json  : 점검 추출 항목만
 """
 import json, os, sys
 
@@ -117,7 +124,7 @@ SYSTEM_PROMPT = (
     '추측하지 않고, 라벨과 위치로 어떤 항목인지 정한다. 개인정보의 실제 값은 어떤 필드에도 적지 않는다. checks는 rules에 있는 '
     '항목만 넣고, 같은 쪽·항목·형태라도 가림 상태가 다르면 상태마다 한 행으로 적는다.')
 
-INSTRUCT_PROMPT = "너는 공공기관 정보공개 담당자가 문서를 공개하기 전에 개인정보 가림을 점검하도록 돕는 도우미다. 앞 단계의 추출 결과(missing_documents, checks, review_reasons, result)와 검증 신호등(빨강=수정 필요, 노랑=검토 필요, 초록=공개 가능)을 보고 최종 판정을 하나 고른 뒤, 담당자가 처리할 순서대로 한국어 안내문을 만든다.\n\n판정 규칙\n① missing_documents가 있거나 checks의 status에 over_masked가 있으면 수정 필요(빨강).\n② 아니고 checks의 status에 검토 필요가 있거나 review_reasons가 있으면 검토 필요(노랑).\n③ 나머지는 공개 가능(초록).\n\n출력 순서\n1. 첫 줄: \"판정: 공개 가능\", \"판정: 수정 필요\", \"판정: 검토 필요\" 중 하나.\n2. 둘째 줄: \"처리 우선순위: 긴급/높음/보통/없음\" 중 하나.\n- 긴급: 노출된 주민등록번호, 계좌번호 또는 사진이 auto_masked에 있음.\n- 높음: 노출된 주소·전화번호·성명이 auto_masked에 있거나, missing_documents·over_masked·판독 불가 항목이 있음.\n- 보통: 결정통지서 없음, 간접 식별 단서 등 담당자 검토 사유만 있음.\n- 없음: 별도 조치가 없음.\n3. auto_masked가 하나라도 있으면 \"공개 조건: 아래 자동 가림 대상을 실제로 가리고 재점검한 뒤 공개\"라고 쓴다. auto_masked가 없으면 \"공개 조건: 담당자 최종 확인 후 공개\"라고 쓴다. 이 판정은 최종 반출 승인이 아니며, 실제 파일 마스킹이 끝났다고 표현하지 않는다.\n4. 필요한 절만 아래 순서로 쓴다.\n[자동 가림 대상] auto_masked 항목을 한 줄씩 쓴다. 형식은 \"- [긴급/높음/보통] [문서] [쪽]쪽 [항목]([형태])\"이다. 주민등록번호·계좌번호·사진을 먼저, 주소·전화번호를 다음, 성명을 마지막에 둔다.\n[재제출 요청] missing_documents와 over_masked 항목을 한 줄씩 쓴다.\n[담당자 확인] 검토 필요 항목과 review_reasons를 한 줄씩 쓴다.\n[재점검] 자동 가림이나 수정이 있으면 \"처리한 공개본을 다시 실행해 auto_masked, over_masked, 검토 필요 항목이 0건인지 확인하세요.\"라고 쓴다.\n\n세부 문구\n- missing_documents의 각 문서: \"- [문서]가 빠져 있습니다. 결정통지서의 공개 대상 문서이니 추가해 주세요.\"\n- status가 over_masked인 항목: \"- [문서] [쪽]쪽의 [항목]이 가려져 있습니다. 결정통지서상 공개 항목이니 원본에서 다시 준비해 주세요.\"\n- status가 검토 필요인 항목: \"- [문서] [쪽]쪽의 [항목]을 읽을 수 없습니다. 원본을 확인해 직접 처리해 주세요.\"\n- review_reasons의 결정통지서 없음이나 간접 단서는 내용을 쓰고 \"직접 확인해 주세요.\"를 붙인다.\n- 코드는 한국어로 바꾼다: decision_notice=결정통지서, complaint_form=민원 신청서, reply_letter=민원 회신문, id_card_copy=신분증 사본, site_inspection_report=현장 조사보고서, name=성명, resident_number=주민등록번호, address=주소, phone=전화번호, account_number=계좌번호, photo=사진, official_name=담당 공무원 성명·직위, text=글자, handwriting=자필 서명, seal=도장.\n- 조사는 앞 단어 받침에 맞게 하나만 쓴다. 이(가)처럼 괄호로 쓰지 않는다.\n- 개인정보의 실제 값은 절대 쓰지 않는다. 인사말, 중복 설명, 근거 없는 추측은 붙이지 않는다."  # 설정 #7(Studio)에서 팀이 고친 안내문
+INSTRUCT_PROMPT = "너는 공공기관 정보공개 담당자가 문서를 공개하기 전에 개인정보 가림을 점검하도록 돕는 도우미다. 앞 단계의 추출 결과(missing_documents, checks, review_reasons, result)와 검증 신호등(빨강=수정 필요, 노랑=검토 필요, 초록=공개 가능)을 보고 최종 판정을 하나 고른 뒤, 담당자가 처리할 순서대로 한국어 안내문을 만든다.\n\n판정 규칙\n① missing_documents가 있거나 checks의 status에 over_masked가 있으면 수정 필요(빨강).\n② 아니고 checks의 status에 검토 필요가 있거나 review_reasons가 있으면 검토 필요(노랑).\n③ 나머지는 공개 가능(초록).\n\n출력 순서\n1. 첫 줄: \"판정: 공개 가능\", \"판정: 수정 필요\", \"판정: 검토 필요\" 중 하나.\n2. 둘째 줄: \"처리 우선순위: 긴급/높음/보통/없음\" 중 하나.\n- 긴급: 노출된 주민등록번호, 계좌번호 또는 사진이 auto_masked에 있음.\n- 높음: 노출된 주소·전화번호·성명이 auto_masked에 있거나, missing_documents·over_masked·판독 불가 항목이 있음.\n- 보통: 결정통지서 없음, 간접 식별 단서 등 담당자 검토 사유만 있음.\n- 없음: 별도 조치가 없음.\n3. auto_masked가 하나라도 있으면 \"공개 조건: 아래 자동 가림 대상을 실제로 가리고 재점검한 뒤 공개\"라고 쓴다. auto_masked가 없으면 \"공개 조건: 담당자 최종 확인 후 공개\"라고 쓴다. 이 판정은 최종 반출 승인이 아니며, 실제 파일 마스킹이 끝났다고 표현하지 않는다.\n4. 필요한 절만 아래 순서로 쓴다.\n[자동 가림 대상] auto_masked 항목을 한 줄씩 쓴다. 형식은 \"- [긴급/높음/보통] [문서] [쪽]쪽 [항목]([형태])\"이다. 주민등록번호·계좌번호·사진을 먼저, 주소·전화번호를 다음, 성명을 마지막에 둔다.\n[재제출 요청] missing_documents와 over_masked 항목을 한 줄씩 쓴다.\n[담당자 확인] 검토 필요 항목과 review_reasons를 한 줄씩 쓴다.\n[공개본] auto_masked가 하나라도 있으면 \"같은 실행의 공개본 결과에서 주민등록번호·주소·전화번호·계좌번호를 가린 공개본 PDF와 가림 처리 내역서를 받을 수 있습니다. 성명·사진은 직접 가려 주세요.\"라고 쓴다.\n\n세부 문구\n- missing_documents의 각 문서: \"- [문서]가 빠져 있습니다. 결정통지서의 공개 대상 문서이니 추가해 주세요.\"\n- status가 over_masked인 항목: \"- [문서] [쪽]쪽의 [항목]이 가려져 있습니다. 결정통지서상 공개 항목이니 원본에서 다시 준비해 주세요.\"\n- status가 검토 필요인 항목: \"- [문서] [쪽]쪽의 [항목]을 읽을 수 없습니다. 원본을 확인해 직접 처리해 주세요.\"\n- review_reasons의 결정통지서 없음이나 간접 단서는 내용을 쓰고 \"직접 확인해 주세요.\"를 붙인다.\n- 코드는 한국어로 바꾼다: decision_notice=결정통지서, complaint_form=민원 신청서, reply_letter=민원 회신문, id_card_copy=신분증 사본, site_inspection_report=현장 조사보고서, name=성명, resident_number=주민등록번호, address=주소, phone=전화번호, account_number=계좌번호, photo=사진, official_name=담당 공무원 성명·직위, text=글자, handwriting=자필 서명, seal=도장.\n- 조사는 앞 단어 받침에 맞게 하나만 쓴다. 이(가)처럼 괄호로 쓰지 않는다.\n- 개인정보의 실제 값은 절대 쓰지 않는다. 인사말, 중복 설명, 근거 없는 추측은 붙이지 않는다."  # 팀이 고친 안내문(설정 #7) + [공개본] 줄
 
 SUMMARY_PROMPT = ('한국어로 2~3문장으로 요약하세요. 신호등 결과와 그 이유(빠진 공개 대상 문서, 공개 항목인데 가린 항목, 읽을 수 '
                   '없는 항목, 결정통지서 없음·간접 단서)를 문서 이름과 쪽까지 적으세요. auto_masked 항목은 자동으로 가린다고 '
@@ -126,8 +133,6 @@ SUMMARY_PROMPT = ('한국어로 2~3문장으로 요약하세요. 신호등 결�
 EXTRACT = 'disclosure_check_schema'
 VALIDATE = '검증-1'
 INSTRUCT = 'instruct-default'
-EXPORT = '내보내기-1'
-EXPORT_TABLE = os.environ.get('EXPORT_TABLE', 'tbl_940f7567e5fd435e8ab9d9df1705816b')  # Studio가 만든 컬렉션 테이블 (없으면 Export 노드 없이)
 ENUM = ['공개 가능', '수정 필요', '검토 필요']
 
 
@@ -157,51 +162,120 @@ def layout():
     return dict(version=1, columns=cols)
 
 
+
+# ── 공개본 갈래: 문서 마스킹하기(Extract mask 모드) ──
+MASK = 'disclosure_mask'
+LOG = 'processing_log'
+COMMON = ('문서에 보이는 글자 그대로(띄어쓰기·하이픈 포함) 값만 적는다. 라벨 글자(예: "민원인 주소", "연락처")는 넣지 않는다. '
+          '이미 검은 박스·흰 덮개·*로 가려져 안 보이는 값과 "(기재 없음)"은 넣지 않는다. 결정통지서 쪽의 글자는 넣지 않는다.')
+FIELDS = {
+    'resident_number': '민원 신청서·민원 회신문·신분증 사본·현장 조사보고서에 보이는 주민등록번호. 일부만 보이면 보이는 부분만 그대로 적는다'
+                       '(예: 900101-1234567, 880214-2). ' + COMMON,
+    'address': '민원인·제3자 등 개인의 주소(도로명·지번·동·호수). 주소가 두 줄이면 줄마다 하나씩 적는다. 기관 주소, 민원이 가리키는 장소'
+               '(신고한 도로·공원·학교 앞 등)는 넣지 않는다. ' + COMMON,
+    'phone': '민원인 등 개인의 연락처·전화번호(예: 010-0000-0000). 기관 대표번호·담당 부서 전화는 넣지 않는다. ' + COMMON,
+    'account_number': '개인의 금융 계좌번호. 은행명이 붙어 있으면 은행명까지 적는다(예: 가상은행 110-0000-000000). ' + COMMON,
+}
+MASK_PROMPT = (
+    '이 PDF는 정보공개 청구 1건의 공개 준비 문서 묶음이다. 공개본을 만들기 위해 결정통지서의 "비공개 대상"에 든 주민등록번호·주소·'
+    '연락처·계좌번호가 결정통지서 밖의 문서(민원 신청서, 민원 회신문, 신분증 사본, 현장 조사보고서)에 보이는 곳을 빠짐없이 찾는다. '
+    '결정통지서가 없으면 이 네 항목을 모두 비공개로 본다. 결정통지서가 어떤 항목을 공개로 정했으면 그 항목은 찾지 않는다. '
+    '직무를 수행한 공무원의 성명·직위, 기관명·기관 주소·기관 전화·직인은 찾지 않는다. 성명·자필 서명·도장·사진은 이 단계에서 다루지 않는다. '
+    '같은 값이 여러 쪽에 나오면 나올 때마다 적는다.'
+)
+LOG_PROMPT = "너는 정보공개 담당자를 돕는 도우미다. 앞 단계(문서 마스킹)가 찾아서 가린 값 목록과 문서를 보고, 공개본의 가림 처리 내역서를 한국어로 만든다.\n\n규칙\n- 개인정보의 실제 값(번호·주소·이름 등)은 절대 쓰지 않는다. 몇 건인지, 어느 문서·쪽인지, 어떤 모양이었는지만 쓴다(예: \"주민등록번호 1건, 앞 6자리와 뒷자리 전체\").\n- 항목 이름은 한국어로: resident_number=주민등록번호, address=주소, phone=전화번호, account_number=계좌번호.\n- 찾은 값이 없는 항목은 \"가린 곳 없음\"으로 쓴다.\n\n출력 형식\n1. 첫 줄: \"가림 처리 내역서\"\n2. \"[자동으로 가린 항목]\" 아래에 항목마다 한 줄: \"- [항목]: [건수]건 ([문서] [쪽]쪽, 모양)\". 문서·쪽을 알 수 없으면 생략한다.\n3. \"[자동 가림 대상이 아닌 항목]\" 아래에: \"- 성명·자필 서명·도장·사진은 자동으로 가리지 않았습니다. 결정통지서 기준으로 담당자가 확인해 주세요.\" 그리고 결정통지서가 공개로 정한 항목(예: 담당 공무원 성명·직위)이 있으면 \"- [항목]은 공개 항목이라 가리지 않았습니다.\"\n4. \"[다음 단계]\" 아래에: \"- 성명·사진·번진 칸 등 남은 항목은 같은 실행의 점검 결과를 보고 담당자가 처리하세요.\"\n인사말이나 다른 설명은 붙이지 않는다. "  # 끝의 NBSP는 Studio 편집 중 들어간 것(설정 #13과 같게 둠)
+
+# ── 분할(Classify) ──
+CLASSIFY = '분류-1'
+CLASS_CHECK, CLASS_MASK = '점검용', '공개본용'
+CLASS_DESC = ('정보공개 청구 1건의 문서 묶음 전체(정보공개 결정통지서와 민원 신청서·민원 회신문·신분증 사본·현장 조사보고서). '
+              '쪽을 나누지 말고 1쪽부터 마지막 쪽까지 모두 하나의 문서로 넣는다.')
+CLASSIFY_PROMPT = ('이 PDF는 정보공개 청구 1건의 문서 묶음이다. 쪽을 나누지 않는다. 1쪽부터 마지막 쪽까지 전체를 "점검용" 문서 하나로, '
+                   '그리고 같은 전체를 "공개본용" 문서 하나로 각각 만든다. 두 문서는 같은 쪽 범위를 겹쳐서 가진다.')
+
+# ── 병합 후 최종 처리 결과 ──
+MERGE = '병합-1'
+FINAL = 'final_report'
+FINAL_PROMPT = "너는 공공기관 정보공개 담당자를 돕는 도우미다. 이 워크플로우는 같은 문서 묶음(원본)을 두 갈래로 동시에 처리했다. 점검 갈래(disclosure_check_schema 추출 결과와 instruct-default 판정)는 원본의 개인정보 가림 상태를 점검했고, 공개본 갈래(disclosure_mask와 processing_log)는 주민등록번호·주소·전화번호·계좌번호를 찾아 가린 공개본 PDF와 가림 처리 내역서를 만들었다. 두 결과를 서로 맞춰 보고 담당자에게 줄 최종 처리 결과를 한국어로 쓴다.\n\n출력 형식\n1. 첫 줄: 점검 갈래의 판정을 그대로 \"판정: 공개 가능\", \"판정: 수정 필요\", \"판정: 검토 필요\" 중 하나로 쓴다.\n2. \"[자동 가림 확인]\" 아래에 점검 결과 checks에서 status가 auto_masked이고 field가 resident_number·address·phone·account_number인 곳마다 한 줄씩 쓴다. 공개본 갈래가 같은 문서·쪽에서 같은 항목의 값을 가렸는지 맞춰 본다.\n- 가렸으면: \"- [문서] [쪽]쪽 [항목]: 가림 확인\"\n- 가린 값이 없으면: \"- [문서] [쪽]쪽 [항목]: 자동 가림 실패, 직접 가려 주세요\"\n공개본 갈래가 가렸는데 점검 결과에 같은 문서·쪽·항목의 auto_masked 행이 없으면 \"- [문서] [쪽]쪽 [항목]: 점검에서 노출로 보지 않은 곳을 가렸습니다. 공개본에서 확인해 주세요\"를 쓴다.\n해당하는 곳이 하나도 없으면 \"- 자동 가림 대상 없음\". 마지막 줄에 \"- 공개본 PDF는 이 실행의 공개본 결과에서 내려받을 수 있습니다.\"를 쓴다.\n3. \"[담당자가 직접 처리할 항목]\" 아래에 다음에 해당하는 것만 한 줄씩 쓴다.\n- 2번에서 \"자동 가림 실패\"인 곳: 같은 문장을 다시 쓴다.\n- checks의 status가 auto_masked이고 field가 name 또는 photo인 곳: \"- [문서] [쪽]쪽 [항목]([형태]): 직접 가려 주세요.\"\n- checks의 status가 검토 필요인 곳: \"- [문서] [쪽]쪽 [항목]: 읽을 수 없습니다. 원본을 확인해 직접 처리해 주세요.\"\n- missing_documents의 각 문서: \"- [문서]: 묶음에 없습니다. 추가해 주세요.\"\n- checks의 status가 over_masked인 곳: \"- [문서] [쪽]쪽 [항목]: 공개 항목인데 가려져 있습니다. 원본으로 다시 준비해 주세요.\"\n- review_reasons 중 결정통지서 없음이나 간접 단서만: 내용을 쓰고 \"직접 확인해 주세요.\"를 붙인다. 빠진 문서, 공개 항목 가림, 번짐·판독 불가 사유는 위 줄들과 겹치므로 review_reasons에서 다시 옮기지 않는다(같은 내용은 한 번만 쓴다).\nstatus가 ok인 곳과 rule이 keep인 공개 항목은 쓰지 않는다. 해당하는 것이 없으면 \"- 없음\". 일반적인 안내 문장은 덧붙이지 않는다.\n4. \"[다음 단계]\" 아래에 한 줄: 3번이 \"- 없음\"이면 \"- 공개본 PDF로 공개를 준비하세요.\", 아니면 \"- 위 항목을 처리한 뒤 공개본 PDF로 공개하세요.\"\n\n코드는 한국어로 바꾼다: decision_notice=결정통지서, complaint_form=민원 신청서, reply_letter=민원 회신문, id_card_copy=신분증 사본, site_inspection_report=현장 조사보고서, name=성명, resident_number=주민등록번호, address=주소, phone=전화번호, account_number=계좌번호, photo=사진, official_name=담당 공무원 성명·직위, text=글자, handwriting=자필 서명, seal=도장. review_reasons를 옮길 때도 코드를 한국어로 바꾼다.\n개인정보의 실제 값은 쓰지 않는다. 인사말이나 다른 설명은 붙이지 않는다."
+
+
 def config():
-    edges = [{'id': 'e0', 'source': {'nodeType': 'parse'}, 'target': {'nodeType': 'extract', 'name': EXTRACT}},
-             {'id': 'e1', 'source': {'nodeType': 'extract', 'name': EXTRACT},
-              'target': {'nodeType': 'validate', 'name': VALIDATE}}]
-    for i, c in enumerate(('red', 'yellow', 'green')):
-        edges.append({'id': f'e{i + 2}', 'source': {'nodeType': 'validate', 'name': VALIDATE},
-                      'target': {'nodeType': 'instruct', 'name': INSTRUCT}, 'condition': {'conditionName': c}})
+    E = lambda i, s, t, cond=None: dict(id=f'e{i}', source=s, target=t, **({'condition': {'conditionName': cond}} if cond else {}))
+    n = lambda t, name=None: {'nodeType': t, **({'name': name} if name else {})}
+    edges = [E(0, n('parse'), n('classify', CLASSIFY)),
+             E(1, n('classify', CLASSIFY), n('extract', EXTRACT), CLASS_CHECK),
+             E(2, n('classify', CLASSIFY), n('extract', MASK), CLASS_MASK),
+             E(3, n('extract', EXTRACT), n('validate', VALIDATE)),
+             E(4, n('extract', MASK), n('instruct', LOG))]
+    edges += [E(5 + i, n('validate', VALIDATE), n('instruct', INSTRUCT), c) for i, c in enumerate(('red', 'yellow', 'green'))]
+    edges += [E(8, n('instruct', LOG), n('merge', MERGE))]
+    edges += [E(9 + i, n('instruct', INSTRUCT), n('merge', MERGE), c) for i, c in enumerate(ENUM)]
+    edges += [E(12, n('merge', MERGE), n('instruct', FINAL))]
     wc = {
         'workflow_name': NAME, 'pipelineType': 'instruct',
         'documentParseConfiguration': {
             'modelName': 'document-parse', 'mode': 'standard', 'ocrMode': 'force', 'lang': '',
             'chartRecognition': False, 'coordinates': True, 'mergeMultipageTables': False,
             'outputFormats': ['html', 'text'], 'base64Encoding': ['figure']},
+        'documentClassifyConfiguration': {
+            'modelName': '',
+            'schema': {'type': 'json_schema', 'json_schema': {'name': 'document-classify', 'schema': {
+                'type': 'string', 'oneOf': [{'const': CLASS_CHECK, 'description': CLASS_DESC},
+                                            {'const': CLASS_MASK, 'description': CLASS_DESC}]}}},
+            'customName': CLASSIFY, 'split': True,
+            'splitCriteria': [{'criterion': '묶음 전체',
+                               'description': '쪽을 나누지 않고 전체를 하나의 문서로 본다. 같은 전체를 점검용과 공개본용에 모두 넣는다.'}],
+            'userSystemPrompt': CLASSIFY_PROMPT, 'allowOverlap': True},
         'informationExtractConfiguration': {
             'modelName': '',
-            'schemas': [{
-                'type': 'json_schema', 'json_schema': {'name': EXTRACT, 'schema': SCHEMA},
-                'schemaLayout': layout(), 'mode': 'enhanced', 'modelName': '', 'nodeMode': 'extract',
-                'manyRows': False, 'manyRowsThreshold': 50, 'manyRowsMaxRowsPerBatch': 400,
-                'manyRowsMaxConcurrent': 5, 'userSystemPrompt': SYSTEM_PROMPT}],
-            'categorySchemaMapping': {}, 'confidenceThreshold': 0.9676},
-        'instructConfiguration': {'nodes': [{'name': INSTRUCT, 'modelName': '', 'prompt': INSTRUCT_PROMPT,
-                                             'enumEnabled': True, 'enumValues': ENUM}],
-                                  'connectionMapping': {}},
+            'schemas': [
+                {'type': 'json_schema', 'json_schema': {'name': EXTRACT, 'schema': SCHEMA}, 'schemaLayout': layout(),
+                 'mode': 'enhanced', 'modelName': '', 'manyRowsThreshold': 50, 'manyRowsMaxRowsPerBatch': 400,
+                 'manyRowsMaxConcurrent': 5, 'userSystemPrompt': SYSTEM_PROMPT},
+                {'type': 'json_schema', 'json_schema': {'name': MASK, 'schema': {
+                    'type': 'object',
+                    'properties': {k: {'type': 'array', 'items': {'type': 'string'}, 'description': v} for k, v in FIELDS.items()}}},
+                 'mode': 'standard', 'modelName': '', 'manyRowsThreshold': 50, 'manyRowsMaxRowsPerBatch': 400,
+                 'manyRowsMaxConcurrent': 5, 'extractType': 'masking', 'nodeMode': 'mask',
+                 'maskOutputFormat': ['pdf', 'image'], 'userSystemPrompt': MASK_PROMPT}],
+            'categorySchemaMapping': {CLASS_CHECK: EXTRACT, CLASS_MASK: MASK}},
+        'instructConfiguration': {
+            'nodes': [{'name': LOG, 'modelName': '', 'prompt': LOG_PROMPT},
+                      {'name': INSTRUCT, 'modelName': '', 'prompt': INSTRUCT_PROMPT, 'enumEnabled': True, 'enumValues': ENUM},
+                      {'name': FINAL, 'modelName': '', 'prompt': FINAL_PROMPT}],
+            'connectionMapping': {LOG: {'targetType': 'extract', 'schemaName': MASK}}},
         'pipelineEdges': edges,
         'validateChecksByName': {VALIDATE: VALIDATE_CHECKS},
         'validateSummaryPromptByName': {VALIDATE: SUMMARY_PROMPT},
     }
-    if EXPORT_TABLE:
-        for i, c in enumerate(ENUM):
-            edges.append({'id': f'e{i + 5}', 'source': {'nodeType': 'instruct', 'name': INSTRUCT},
-                          'target': {'nodeType': 'export', 'name': EXPORT}, 'condition': {'conditionName': c}})
-        wc.update(exportNodeNames=[EXPORT],
-                  exportCollectionsByName={EXPORT: {'tableKeys': {f'extract:{EXTRACT}': EXPORT_TABLE}}},
-                  exportDestinationsByName={})
     return {'kind': 'studio.workflow-config-draft', 'schemaVersion': 4, 'exportedFrom': {'workflowName': NAME},
             'workflowConfig': wc}
+
+
+def canon_sums(wc):
+    """Studio 내보내기와 비교하려고 최상위 키마다 (길이, 코드포인트 합)을 낸다."""
+    def canon(o):
+        if isinstance(o, list):
+            return [canon(x) for x in o]
+        if isinstance(o, dict):
+            return {k: canon(o[k]) for k in sorted(o)}
+        return o
+    out = {}
+    for k in sorted(wc):
+        s = json.dumps(canon(wc[k]), ensure_ascii=False, separators=(',', ':'))
+        out[k] = (len(s), sum(map(ord, s)))
+    return out
 
 
 if __name__ == '__main__':
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, '정보공개점검_workflow_config.json')
-    json.dump(config(), open(path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+    c = config()
+    json.dump(c, open(path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
     json.dump({'type': 'json_schema', 'json_schema': {'name': 'document-schema', 'schema': SCHEMA}},
               open(os.path.join(OUT, '정보공개점검_extract_schema.json'), 'w', encoding='utf-8'), ensure_ascii=False,
               indent=2)
-    print('system', len(SYSTEM_PROMPT), 'instruct', len(INSTRUCT_PROMPT), 'export', bool(EXPORT_TABLE),
-          'config bytes', os.path.getsize(path))
+    print('wrote', path, os.path.getsize(path), 'bytes')
+    if '--sums' in sys.argv:
+        for k, v in canon_sums(c['workflowConfig']).items():
+            print(k, *v)
