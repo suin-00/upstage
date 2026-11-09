@@ -1,4 +1,5 @@
-"""정보공개 문서 개인정보 가림 점검 워크플로우 설정 생성기 (Studio 설정 #20).
+"""정보공개 문서 개인정보 가림 점검 워크플로우 설정 생성기 (Studio 설정 #21).
+#21: #20 + review_reasons ③ 공개 항목 가림 확인 칸에 영문 칸 이름("Official in Charge" 등) 추가.
 
 원본 PDF를 한 번 실행하면 점검과 공개본 만들기가 함께 돈다.
   Parse(OCR 강제, 좌표)
@@ -9,7 +10,7 @@
 Studio는 한 경로에 Extract를 하나만 허용해서(마스킹도 Extract) Classify 분할로 갈래를 나눴다.
 겹침 허용(allowOverlap)은 편집기 화면에 없는 설정이라, Studio에서 Classify 노드를 고치면 풀릴 수 있다.
 
-workflow/정보공개점검_workflow_config.json : Studio '워크플로우 설정 가져오기'용 (설정 #20 내보내기와 같은 내용)
+workflow/정보공개점검_workflow_config.json : Studio '워크플로우 설정 가져오기'용 (설정 #21 내보내기와 같은 내용)
 workflow/정보공개점검_extract_schema.json  : 점검 추출 항목만
 """
 import json, os, sys
@@ -95,7 +96,7 @@ SCHEMA = {'type': 'object', 'properties': {
                           '주민등록번호·주소·연락처·계좌번호 값 자리를 하나씩 보고, 검은 박스·흰 덮개·*가 아니라 뿌옇게 번진 회색 얼룩(블러)이라 글자를 읽을 수 없는 칸이 있으면 '
                           '"[쪽]쪽 [문서] [항목]: 번져서 판독할 수 없음"을 적는다. 블러는 가린 것으로 보지 않는다. 스캔이 '
                           '흐리거나 배경이 회색이어도 글자가 읽히면 번짐이 아니다. ② 결정통지서의 공개 예정 자료 중 빠진 문서. '
-                          '③ 공개 항목 가림: 민원 회신문·현장 조사보고서의 "담당 공무원"·"담당"·"담당자"·"작성자"·"접수 담당" 칸(직무 '
+                          '③ 공개 항목 가림: 민원 회신문·현장 조사보고서의 "담당 공무원"·"담당"·"담당자"·"작성자"·"접수 담당" 칸, 영문 문서의 "Official in Charge"·"Officer in Charge"·"Person in Charge"·"Prepared by"·"Received by" 칸(직무 '
                           '수행 공무원의 성명·직위)과 결정통지서가 공개로 정한 항목을 하나씩 보고, 검은 박스·흰 덮개·*로 가려져 있으면 '
                           '"[쪽]쪽 [문서] official_name: 공개 항목이 가려짐"을 적는다. 이름·직위 글자가 읽히면 가려진 것이 아니므로 '
                           '적지 않는다. 위아래 다른 칸(민원인 연락처 등)의 박스는 이 칸의 가림으로 보지 않는다. ④ 무엇을 가렸는지 알 수 없는 가림 박스. '
@@ -236,10 +237,9 @@ def config():
             'userSystemPrompt': CLASSIFY_PROMPT, 'allowOverlap': True},
         'informationExtractConfiguration': {
             'modelName': '',
-            'confidenceThreshold': 0.9676,  # Studio가 가져오기 때 채우는 기본값(설정 #14부터 내보내기에 들어감)
             'schemas': [
                 {'type': 'json_schema', 'json_schema': {'name': EXTRACT, 'schema': SCHEMA}, 'schemaLayout': layout(),
-                 'mode': 'enhanced', 'modelName': '', 'nodeMode': 'extract', 'manyRowsThreshold': 50,
+                 'mode': 'enhanced', 'modelName': '', 'manyRowsThreshold': 50,
                  'manyRowsMaxRowsPerBatch': 400, 'manyRowsMaxConcurrent': 5, 'userSystemPrompt': SYSTEM_PROMPT},
                 {'type': 'json_schema', 'json_schema': {'name': MASK, 'schema': {
                     'type': 'object',
